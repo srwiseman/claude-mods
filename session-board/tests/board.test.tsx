@@ -1,31 +1,52 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { RenderPropsOf } from 'claude-code'
+import type { On, RenderPropsOf } from 'claude-code'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
+const settle = () => new Promise(r => setTimeout(r, 50))
+
+const world = (on: On, summary: (prompt: string) => object) => {
+  mock.clock(on, { now: Date.UTC(2026, 9, 6, 15, 30) })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('classic.Notification', () => ({}))
+  on('classic.Stop', () => ({}))
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  on('model.complete', (_$, e) =>
+    ({ value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } }) as never,
+  )
+  on('tool.call', (_$, e) => {
+    if (e.tool === 'ScheduleWakeup') {
+      return { result: { scheduledFor: Date.UTC(2026, 9, 6, 16, 0), clampedDelaySeconds: 1800, wasClamped: false } }
+    }
+    return { result: {} as never }
+  })
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`tallies changes, schedule and needs on ${surface}`, async ($, on) => {
-    mock.clock(on, { now: Date.UTC(2026, 9, 6, 15, 30) })
-    on('ui.status', () => ({ value: undefined }) as never)
-    on('classic.Notification', () => ({}))
-    on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
-    on('tool.check', () => ({ decision: 'ask' as const }))
-    on('tool.call', (_$, e) => {
-      if (e.tool === 'ScheduleWakeup') {
-        return { result: { scheduledFor: Date.UTC(2026, 9, 6, 16, 0), clampedDelaySeconds: 1800, wasClamped: false } }
-      }
-      return { result: {} as never }
+  test(`logs outcomes, schedule and needs on ${surface}`, async ($, on) => {
+    let sent = ''
+    world(on, prompt => {
+      sent = prompt
+      return { done: ['Fixed the login bug so users can sign in again'], ask: null }
     })
 
-    await $.tool.call({ tool: 'Edit', file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' })
-    await $.tool.call({ tool: 'Edit', file_path: '/repo/src/app.ts', old_string: 'b', new_string: 'c' })
-    await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1800, reason: 'check the CI run', prompt: 'check CI', noop: false })
+    await $.prompt.submit({ text: 'fix the login bug' } as never)
+    await $.tool.call({ tool: 'Edit', file_path: '/Users/someone/repo/src/auth.ts', old_string: 'a', new_string: 'b' })
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
     await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+    await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Fixed it; tests pass.' } as never)
+    await settle()
+    await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1800, reason: 'check the CI run', prompt: 'check CI', noop: false })
+
+    // The model is shown the request and the actions, never the person's home folder
+    expect(sent).toContain('fix the login bug')
+    expect(sent).toContain('edited src/auth.ts')
+    expect(sent).toContain('ran: Run the test suite')
+    expect(sent.includes('/Users/someone')).toBe(false)
 
     const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', props: PANE, requestId: 'session-board' })
-
-    expect(await ui.find({ text: /Edited app\.ts ×2/ })).toBeDefined()
-    expect(await ui.find({ text: /1 file touched \(2 edits\)/ })).toBeDefined()
+    expect(await ui.find({ text: /✓ Fixed the login bug so users can sign in again/ })).toBeDefined()
+    expect(await ui.find({ text: /from 1 file edit and 1 command/ })).toBeDefined()
     expect(await ui.find({ text: /Wake at .*check the CI run/ })).toBeDefined()
     expect(await ui.find({ text: /Needs you \(1\)/ })).toBeDefined()
 
@@ -34,23 +55,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-test('turns the end of a turn into a short to-do, or nothing', async ($, on) => {
-  mock.clock(on, { now: 0 })
-  on('ui.status', () => ({ value: undefined }) as never)
-  on('classic.Stop', () => ({}))
-  on('model.complete', (_$, e) =>
-    e.prompt.includes('Want me to set up option 1?')
-      ? ({ value: { isAnswered: true, text: 'Decide: install mod as a plugin?', usage: {} } } as never)
-      : ({ value: { isAnswered: true, text: 'NONE', usage: {} } } as never),
-  )
-
+test('a question-only turn logs nothing but surfaces the ask', async ($, on) => {
+  world(on, () => ({ done: [], ask: 'Decide: install mod as a plugin?' }))
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
 
-  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'All done, tests pass.' } as never)
-  await new Promise(r => setTimeout(r, 50))
-  expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Two ways. Want me to set up option 1?' } as never)
+  await settle()
 
-  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Two ways to do it. Want me to set up option 1?' } as never)
-  await new Promise(r => setTimeout(r, 50))
+  expect(await ui.find({ text: /Done this session \(0\)/ })).toBeDefined()
   expect(await ui.find({ text: /⚑ Decide: install mod as a plugin\?/ })).toBeDefined()
 })

@@ -1,14 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Change, Need, Upcoming } from '../types'
+import type { Done, Need, Upcoming } from '../types'
 
 const PANE = 'session-board'
-const changes = atom({ plugin: 'session-board', key: 'changes' } as const, [])
+const done = atom({ plugin: 'session-board', key: 'done' } as const, [])
+const activity = atom({ plugin: 'session-board', key: 'activity' } as const, { edits: 0, commands: 0 })
 const upcoming = atom({ plugin: 'session-board', key: 'upcoming' } as const, [])
 const needs = atom({ plugin: 'session-board', key: 'needs' } as const, [])
 
-const baseName = (path: unknown) => String(path ?? '').split('/').pop() || 'a file'
+// The last two parts of a path, enough to say which file without the person's folders
+const shortPath = (path: unknown) => String(path ?? '').split('/').slice(-2).join('/') || 'a file'
 const oneLine = (text: unknown, max = 60) => {
   const line = (String(text ?? '').split('\n')[0] ?? '').trim()
   return line.length > max ? line.slice(0, max - 1) + '…' : line
@@ -16,18 +18,6 @@ const oneLine = (text: unknown, max = 60) => {
 const clockTime = (ms: number) => {
   const d = new Date(ms)
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-// Keeps one row per file or command, counting repeats
-const tally = async ($: EngineInterface, verb: string, what: string) => {
-  const at = await $.clock.now()
-  const key = `${verb}:${what}`
-  await update($, changes, list => {
-    const found = list.find(c => c.key === key)
-    const rest = list.filter(c => c.key !== key)
-    const row: Change = found ? { ...found, count: found.count + 1, at } : { key, verb, what, count: 1, at }
-    return [...rest, row].slice(-100)
-  })
 }
 
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
@@ -50,39 +40,70 @@ const showNeedCount = async ($: EngineInterface) => {
 const putUpcoming = async ($: EngineInterface, item: Upcoming) =>
   update($, upcoming, list => [...list.filter(u => u.id !== item.id), item])
 
-const ASK_PROMPT = `Below is the last message an AI coding assistant sent its user.
-If it asks the user to answer, decide, approve, or do something, reply with ONLY that ask as a short to-do of at most 8 words, starting with a verb (for example "Decide: install mod as plugin or env var?" or "Run gcloud auth login").
-If it needs nothing from the user, reply with exactly NONE.
+const TURN_PROMPT = (request: string, actions: string[], message: string, logged: Done[]) => `You keep a running log, for a non-programmer, of what an AI coding assistant accomplished in a session.
 
-Message:
-`
+The user's request this turn:
+${request || '(none: the assistant continued on its own)'}
 
-// The one thing Claude's last message asks of the person, in a few words; null when it asks nothing
-const summarizeAsk = async ($: EngineInterface, message: string): Promise<string | null> => {
+What the assistant did this turn:
+${actions.length ? actions.map(a => `- ${a}`).join('\n') : '(no changes)'}
+
+The assistant's final message:
+${message.slice(-3000)}
+
+Already in the log (never repeat or restate these):
+${logged.length ? logged.map(d => `- ${d.text}`).join('\n') : '(empty)'}
+
+Reply with JSON only, no prose: {"done": [...], "ask": ...}
+
+"done": 0 to 2 results of THIS turn. Each is one past-tense sentence of at most 12 words saying what now exists or works and why it matters, in plain words anyone understands. Describe outcomes, never commands or files. Good: "Published the mod to GitHub so it installs on any machine". Bad: "Ran git push", "Edited register.tsx". Only things actually finished. Use [] when the turn only answered a question, investigated, or failed.
+
+"ask": if the final message asks the user to answer, decide, approve or do something, that ask as a to-do of at most 9 words starting with a verb, like "Decide: install mod as plugin or env var?". Otherwise null.`
+
+type TurnSummary = { done: string[]; ask: string | null }
+
+// What the turn achieved and what it asks of the person, from one small model call
+const summarizeTurn = async (
+  $: EngineInterface,
+  request: string,
+  actions: string[],
+  message: string,
+): Promise<TurnSummary> => {
+  const logged = (await read($, done)).slice(-15)
   const reply = await $.model.complete({
     model: 'claude-haiku-4-5-20251001',
-    prompt: ASK_PROMPT + message.slice(-4000),
-    maxTokens: 40,
-    timeoutMs: 15000,
+    prompt: TURN_PROMPT(request.slice(0, 1500), actions.slice(-40), message, logged),
+    maxTokens: 200,
+    timeoutMs: 20000,
   })
   if (reply.isAnswered) {
-    const text = oneLine(reply.text.replace(/^["']|["']$/g, ''), 70)
-    return text === '' || /^NONE\b/i.test(text) ? null : text
+    try {
+      const json = JSON.parse(reply.text.slice(reply.text.indexOf('{'), reply.text.lastIndexOf('}') + 1)) as Partial<TurnSummary>
+      return {
+        done: (Array.isArray(json.done) ? json.done : []).map(d => oneLine(d, 100)).filter(Boolean).slice(0, 2),
+        ask: typeof json.ask === 'string' && json.ask.trim() ? oneLine(json.ask, 70) : null,
+      }
+    } catch {
+      // Fall through to the plain fallback below
+    }
   }
-  // No model answer: fall back to the last question Claude asked, if any
+  // No usable answer: log nothing, and surface the last question Claude asked, if any
   const questions = message.match(/[^.!?\n]*\?/g)
   const last = questions?.[questions.length - 1]
-  return last ? oneLine(last, 70) : null
+  return { done: [], ask: last ? oneLine(last, 70) : null }
 }
 
 export const register: Register = on => {
   // Counts the person's prompts, so a summary that lands after they replied is dropped
   let prompts = 0
+  // This turn's request and what changed during it, read when the turn ends
+  let request = ''
+  let actions: string[] = []
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'board',
-      description: 'Show the session board: changes, what is next, and what needs you',
+      description: 'Show the session board: what got done, what is next, and what needs you',
     })
     void $.ui.open({ id: PANE, title: 'Session' })
 
@@ -98,6 +119,7 @@ export const register: Register = on => {
   // The person acted, so the "your move" items are settled
   on('prompt.submit', async ($, e, next) => {
     prompts += 1
+    request = e.text
     await dropNeeds($, n => n.id === 'turn' || n.id === 'notify')
 
     return next(e)
@@ -133,15 +155,18 @@ export const register: Register = on => {
         return ran
       }
 
-      if (e.tool === 'Edit') {
-        await tally($, 'Edited', baseName(e.file_path))
-      } else if (e.tool === 'Write') {
-        await tally($, 'Wrote', baseName(e.file_path))
-      } else if (e.tool === 'NotebookEdit') {
-        await tally($, 'Edited notebook', baseName(e.notebook_path))
+      if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') {
+        const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
+        actions.push(`${e.tool === 'Write' ? 'wrote' : 'edited'} ${shortPath(path)}`)
+        await update($, activity, a => ({ ...a, edits: a.edits + 1 }))
       } else if (e.tool === 'Bash' && !ran.isReadOnly) {
-        await tally($, 'Ran', oneLine(e.description ?? e.command, 50))
-      } else if (e.tool === 'CronCreate' && ran.result) {
+        actions.push(`ran: ${oneLine(e.description ?? e.command, 100)}`)
+        await update($, activity, a => ({ ...a, commands: a.commands + 1 }))
+      } else if (!ran.isReadOnly && !e.tool.startsWith('Task') && e.tool !== 'Read') {
+        actions.push(`used ${e.tool}`)
+      }
+
+      if (e.tool === 'CronCreate' && ran.result) {
         const job = ran.result as { id: string; humanSchedule: string }
         await putUpcoming($, { id: job.id, label: `${job.humanSchedule}: ${oneLine(e.prompt, 45)}` })
       } else if (e.tool === 'CronDelete') {
@@ -186,13 +211,21 @@ export const register: Register = on => {
 
     // Summarized in the background so the turn's end is not held up
     const message = e.last_assistant_message
+    const turnActions = actions
+    actions = []
     if (message) {
       const asked = prompts
-      void summarizeAsk($, message).then(async ask => {
-        if (ask && asked === prompts) {
-          await addNeed($, 'turn', ask)
-        }
-      }).catch(() => undefined)
+      void summarizeTurn($, request, turnActions, message)
+        .then(async summary => {
+          if (summary.done.length) {
+            const at = await $.clock.now()
+            await update($, done, list => [...list, ...summary.done.map(text => ({ text, at }))].slice(-50))
+          }
+          if (summary.ask && asked === prompts) {
+            await addNeed($, 'turn', summary.ask)
+          }
+        })
+        .catch(() => undefined)
     }
 
     return next(e)
@@ -203,13 +236,10 @@ export const register: Register = on => {
     const width = Math.max(20, (e.props.bodyColumns ?? 40) - 2)
     const fit = (text: string) => (text.length > width ? text.slice(0, width - 1) + '…' : text)
 
-    const changeList = await read($, changes)
+    const log = await read($, done)
+    const work = await read($, activity)
     const next = await read($, upcoming)
     const waiting = await read($, needs)
-
-    const files = changeList.filter(c => c.verb !== 'Ran').length
-    const edits = changeList.filter(c => c.verb !== 'Ran').reduce((sum, c) => sum + c.count, 0)
-    const runs = changeList.filter(c => c.verb === 'Ran').reduce((sum, c) => sum + c.count, 0)
 
     return (
       <Box flexDirection="column">
@@ -229,19 +259,19 @@ export const register: Register = on => {
         ))}
 
         <Text> </Text>
-        <Text bold>Changes</Text>
-        <Text dimColor>
-          {fit(`  ${files} file${files === 1 ? '' : 's'} touched (${edits} edits) · ${runs} command${runs === 1 ? '' : 's'} run`)}
-        </Text>
-        {changeList
-          .slice(-15)
-          .reverse()
-          .map(c => (
-            <Text>{fit(`  ${c.verb === 'Ran' ? '▸' : '✎'} ${c.verb} ${c.what}${c.count > 1 ? ` ×${c.count}` : ''}`)}</Text>
-          ))}
-        {changeList.length > 0 && (
+        <Text bold>Done this session ({log.length})</Text>
+        {log.length === 0 && <Text dimColor>  Nothing finished yet.</Text>}
+        {log.slice(-12).map(d => (
+          <Text wrap="wrap">  ✓ {d.text}</Text>
+        ))}
+        {work.edits + work.commands > 0 && (
+          <Text dimColor>
+            {fit(`  from ${work.edits} file edit${work.edits === 1 ? '' : 's'} and ${work.commands} command${work.commands === 1 ? '' : 's'}`)}
+          </Text>
+        )}
+        {log.length > 0 && (
           <Box marginTop={1}>
-            <Button key="clear" label="Clear changes" onPress={() => update($, changes, () => [])} />
+            <Button key="clear" label="Clear log" onPress={() => update($, done, () => [])} />
           </Box>
         )}
       </Box>
