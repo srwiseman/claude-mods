@@ -1,6 +1,6 @@
 {
   "name": "session-board",
-  "version": "0.1.0",
-  "description": "A sidebar tallying what changed, what is scheduled next, and what needs you",
+  "version": "0.5.0",
+  "description": "A sidebar showing what needs you, what's scheduled next, what got done, and what it cost",
   "types": "./types/index.d.ts"
 }
