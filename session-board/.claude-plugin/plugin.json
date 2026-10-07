@@ -1,0 +1,6 @@
+{
+  "name": "session-board",
+  "version": "0.1.0",
+  "description": "A sidebar tallying what changed, what is scheduled next, and what needs you",
+  "types": "./types/index.d.ts"
+}

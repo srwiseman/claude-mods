@@ -1,0 +1,11 @@
+{
+  "name": "my-mods",
+  "owner": { "name": "srwiseman" },
+  "plugins": [
+    {
+      "name": "session-board",
+      "source": "./session-board",
+      "description": "A sidebar tallying what changed, what is scheduled next, and what needs you"
+    }
+  ]
+}
