@@ -19,6 +19,8 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('command.register', () => ({ value: undefined }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('classic.PermissionRequest', () => ({}))
+  on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd: 0.5 } } }) as never)
+  on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('classic.Notification', () => ({}))
   on('classic.Stop', () => ({}))
@@ -110,4 +112,21 @@ test('a question-only turn logs nothing but surfaces the ask', async ($, on) => 
 
   expect(await ui.find({ text: /Done this session \(0\)/ })).toBeDefined()
   expect(await ui.find({ text: /⚑ Decide: install mod as a plugin\?/ })).toBeDefined()
+})
+
+test('shows the session cost and plan limits as they move', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ text: /\$0\.50 this session$/ })).toBeDefined()
+
+  await $.session.measure({
+    context: {},
+    cost: { usd: 3.4 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 85 }, { kind: 'seven_day', percentUsed: 12.5 }],
+    changed: ['cost', 'rateLimits'],
+  } as never)
+  expect(await ui.find({ text: /\$3\.40 this session \(API-equivalent\)/ })).toBeDefined()
+  expect(await ui.find({ text: /5-hour limit: 85% used/ })).toBeDefined()
+  expect(await ui.find({ text: /Weekly limit: 13% used/ })).toBeDefined()
 })

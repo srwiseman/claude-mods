@@ -8,6 +8,7 @@ const done = atom({ plugin: 'session-board', key: 'done' } as const, [])
 const activity = atom({ plugin: 'session-board', key: 'activity' } as const, { edits: 0, commands: 0 })
 const upcoming = atom({ plugin: 'session-board', key: 'upcoming' } as const, [])
 const needs = atom({ plugin: 'session-board', key: 'needs' } as const, [])
+const spend = atom({ plugin: 'session-board', key: 'spend' } as const, { limits: [] })
 
 // The last two parts of a path, enough to say which file without the person's folders
 const shortPath = (path: unknown) => String(path ?? '').split('/').slice(-2).join('/') || 'a file'
@@ -15,6 +16,8 @@ const oneLine = (text: unknown, max = 60) => {
   const line = (String(text ?? '').split('\n')[0] ?? '').trim()
   return line.length > max ? line.slice(0, max - 1) + '…' : line
 }
+const LIMIT_NAMES: Record<string, string> = { five_hour: '5-hour limit', seven_day: 'Weekly limit', spend_limit: 'Spend limit' }
+const money = (usd: number) => (usd < 10 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(0)}`)
 const clockTime = (ms: number) => {
   const d = new Date(ms)
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -134,8 +137,17 @@ export const register: Register = on => {
       description: 'Show the session board: what got done, what is next, and what needs you',
     })
     await restore($)
+    const usage = await $.session.usage()
+    await update($, spend, () => ({ usd: usage.cost?.usd, limits: usage.rateLimits }))
     void prune($).catch(() => undefined)
     void $.ui.open({ id: PANE, title: 'Session' })
+
+    return next(e)
+  })
+
+  // The engine reports when the cost grows or a usage window moves
+  on('session.measure', async ($, e, next) => {
+    await update($, spend, () => ({ usd: e.cost?.usd, limits: e.rateLimits }))
 
     return next(e)
   })
@@ -299,6 +311,9 @@ export const register: Register = on => {
     const work = await read($, activity)
     const next = await read($, upcoming)
     const waiting = await read($, needs)
+    const cost = await read($, spend)
+    // Usage windows only come with a subscription, where the dollar figure is what the API would charge
+    const isPlan = cost.limits.some(l => l.kind !== 'spend_limit')
 
     return (
       <Box flexDirection="column">
@@ -340,6 +355,21 @@ export const register: Register = on => {
             />
           </Box>
         )}
+
+        <Text> </Text>
+        <Text bold>Cost</Text>
+        {cost.usd === undefined && <Text dimColor>  No figure yet.</Text>}
+        {cost.usd !== undefined && (
+          <Text>{fit(`  ${money(cost.usd)} this session${isPlan ? ' (API-equivalent)' : ''}`)}</Text>
+        )}
+        {cost.limits.map(l => (
+          <Text color={l.percentUsed >= 80 ? 'yellow' : undefined} dimColor={l.percentUsed < 80}>
+            {fit(
+              `  ${LIMIT_NAMES[l.kind] ?? l.kind}: ${Math.round(l.percentUsed)}% used` +
+                (l.resetsAt ? `, resets ${clockTime(Date.parse(l.resetsAt))}` : ''),
+            )}
+          </Text>
+        ))}
       </Box>
     )
   })

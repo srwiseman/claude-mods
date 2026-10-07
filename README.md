@@ -8,6 +8,7 @@ A **Session** pane beside the transcript with three live sections:
 
 - **Needs you**: permission dialogs actually shown to you (nothing in auto mode unless it asks), questions and plans waiting on you, and a few-word summary of what Claude's last message asks you to do. The count also shows in the status line.
 - **Up next**: scheduled wakeups, recurring jobs, and running background tasks.
+- **Cost**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), plus your plan's 5-hour and weekly limits.
 - **Done this session**: plain-English results of each turn ("Published the mod to GitHub so it installs on any machine"), not a list of commands.
 
 Opens by itself in terminals 144+ columns wide; otherwise type `/board`.
