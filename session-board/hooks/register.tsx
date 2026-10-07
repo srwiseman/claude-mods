@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Done, Need, Upcoming } from '../types'
+import type { Activity, Done, Need, Upcoming } from '../types'
 
 const PANE = 'session-board'
 const done = atom({ plugin: 'session-board', key: 'done' } as const, [])
@@ -18,6 +18,34 @@ const oneLine = (text: unknown, max = 60) => {
 const clockTime = (ms: number) => {
   const d = new Date(ms)
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// The log outlives the process: saved per session in the store, restored when the session comes back
+const STORE_PREFIX = 'board:'
+const KEEP_DAYS = 30
+type Saved = { done: Done[]; activity: Activity; savedAt: number }
+
+const save = async ($: EngineInterface) => {
+  const saved: Saved = { done: await read($, done), activity: await read($, activity), savedAt: await $.clock.now() }
+  await $.store.set(STORE_PREFIX + (await $.session.id()), saved)
+}
+
+const restore = async ($: EngineInterface) => {
+  const saved = (await $.store.get(STORE_PREFIX + (await $.session.id()))) as Saved | undefined
+  if (saved && (await read($, done)).length === 0) {
+    await update($, done, () => saved.done)
+    await update($, activity, () => saved.activity)
+  }
+}
+
+// Drops saved boards of sessions untouched for a month
+const prune = async ($: EngineInterface) => {
+  const cutoff = (await $.clock.now()) - KEEP_DAYS * 24 * 60 * 60 * 1000
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(STORE_PREFIX)) continue
+    const saved = (await $.store.get(key)) as Saved | undefined
+    if (!saved || saved.savedAt < cutoff) await $.store.delete(key)
+  }
 }
 
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
@@ -105,12 +133,41 @@ export const register: Register = on => {
       name: 'board',
       description: 'Show the session board: what got done, what is next, and what needs you',
     })
+    await restore($)
+    void prune($).catch(() => undefined)
     void $.ui.open({ id: PANE, title: 'Session' })
 
     return next(e)
   })
 
+  // A /clear starts a new conversation under a new id: start the board over too
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      await update($, done, () => [])
+      await update($, activity, () => ({ edits: 0, commands: 0 }))
+      await update($, needs, () => [])
+      await update($, upcoming, () => [])
+      await showNeedCount($)
+    }
+
+    return next(e)
+  })
+
+  // Another pane (the diff panel, say) closing brings the board back, unless the person closed it
+  let closedByPerson = false
+  on('ui.close', async ($, e, next) => {
+    const closed = await next(e)
+    if (e.id === PANE) {
+      closedByPerson = e.origin.kind === 'person'
+    } else if (!closedByPerson) {
+      void $.ui.open({ id: PANE, title: 'Session' })
+    }
+
+    return closed
+  })
+
   on('command.run', { command: 'board' }, async $ => {
+    closedByPerson = false
     await $.ui.open({ id: PANE, title: 'Session' })
 
     return { text: 'Session board opened.' }
@@ -125,16 +182,13 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Permission prompts: an "ask" verdict means a dialog is waiting on the person
-  on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
-    if (verdict.decision === 'ask' && e.tool_use_id) {
-      const input = (e.input ?? {}) as Record<string, unknown>
-      const subject = input.command ?? input.file_path ?? input.url ?? ''
-      await addNeed($, e.tool_use_id, `Approve ${e.tool}${subject ? `: ${oneLine(subject, 50)}` : ''}`)
-    }
+  // Fires only when a permission dialog is really put to the person, never for what a mode decides alone
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const input = (e.tool_input ?? {}) as Record<string, unknown>
+    const subject = input.description ?? input.command ?? input.file_path ?? input.url ?? ''
+    await addNeed($, `perm:${e.tool_name}`, `Approve ${e.tool_name}${subject ? `: ${oneLine(subject, 50)}` : ''}`)
 
-    return verdict
+    return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
@@ -183,21 +237,25 @@ export const register: Register = on => {
 
       return ran
     } finally {
-      if (id) {
-        await dropNeeds($, n => n.id === id)
-      }
+      // The call went ahead or was refused: any dialog for it is answered
+      await dropNeeds($, n => n.id === id || n.id === `perm:${e.tool}`)
     }
   })
 
   // Claude Code is waiting on the person (idle, or a permission dialog)
   on('classic.Notification', async ($, e, next) => {
-    await addNeed($, 'notify', oneLine(e.message, 60))
+    // Idle reminders repeat what the turn summary already says, so only real dialogs count
+    if (e.notification_type === 'permission_prompt' || e.notification_type === 'elicitation_dialog') {
+      await addNeed($, 'notify', oneLine(e.message, 60))
+    }
 
     return next(e)
   })
 
   // Each turn end carries the true list of scheduled and background work
   on('classic.Stop', async ($, e, next) => {
+    // The turn is over, so no dialog from it is still open
+    await dropNeeds($, n => n.id.startsWith('perm:') || n.id === 'notify')
     const known = await read($, upcoming)
     const crons: Upcoming[] = (e.session_crons ?? []).map(c => {
       const ours = known.find(u => u.id === c.id || (u.id === 'wakeup' && !c.recurring))
@@ -221,6 +279,7 @@ export const register: Register = on => {
             const at = await $.clock.now()
             await update($, done, list => [...list, ...summary.done.map(text => ({ text, at }))].slice(-50))
           }
+          await save($)
           if (summary.ask && asked === prompts) {
             await addNeed($, 'turn', summary.ask)
           }
@@ -271,7 +330,14 @@ export const register: Register = on => {
         )}
         {log.length > 0 && (
           <Box marginTop={1}>
-            <Button key="clear" label="Clear log" onPress={() => update($, done, () => [])} />
+            <Button
+              key="clear"
+              label="Clear log"
+              onPress={async () => {
+                await update($, done, () => [])
+                await save($)
+              }}
+            />
           </Box>
         )}
       </Box>
