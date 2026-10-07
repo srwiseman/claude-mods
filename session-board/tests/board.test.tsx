@@ -3,6 +3,8 @@ import type { On, RenderPropsOf } from 'claude-code'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
 const settle = () => new Promise(r => setTimeout(r, 50))
+const ended = (answer: string, turnId = 't1', agentId?: string) =>
+  ({ answer, durationMs: 1000, isAborted: false, turnId, reason: 'answer', ...(agentId ? { agentId } : {}) }) as never
 
 const NOW = Date.UTC(2026, 9, 6, 15, 30)
 
@@ -24,6 +26,8 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('ui.status', () => ({ value: undefined }) as never)
   on('classic.Notification', () => ({}))
   on('classic.Stop', () => ({}))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
   on('model.complete', (_$, e) =>
     ({ value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } }) as never,
@@ -44,10 +48,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
       return { done: ['Fixed the login bug so users can sign in again'], ask: null }
     })
 
-    await $.prompt.submit({ text: 'fix the login bug' } as never)
+    await $.turn.start({ text: 'fix the login bug', turnId: 't1' })
     await $.tool.call({ tool: 'Edit', file_path: '/Users/someone/repo/src/auth.ts', old_string: 'a', new_string: 'b' })
     await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the test suite' })
-    await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Fixed it; tests pass.' } as never)
+    await $.turn.complete(ended('Fixed it; tests pass.'))
     await settle()
     await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1800, reason: 'check the CI run', prompt: 'check CI', noop: false })
 
@@ -94,7 +98,7 @@ test('the log is saved, restored after a restart, and reset by /clear', async ($
   expect(await ui.find({ text: /from 3 file edits and 2 commands/ })).toBeDefined()
   expect(stored.has('board:old-session')).toBe(false)
 
-  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Added it.' } as never)
+  await $.turn.complete(ended('Added it.'))
   await settle()
   const saved = stored.get('board:session-1') as { done: { text: string }[] }
   expect(saved.done.map(d => d.text)).toEqual(['Shipped the login fix', 'Added a dark mode toggle'])
@@ -107,7 +111,7 @@ test('a question-only turn logs nothing but surfaces the ask', async ($, on) => 
   world(on, () => ({ done: [], ask: 'Decide: install mod as a plugin?' }))
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
 
-  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Two ways. Want me to set up option 1?' } as never)
+  await $.turn.complete(ended('Two ways. Want me to set up option 1?'))
   await settle()
 
   expect(await ui.find({ text: /Done this session \(0\)/ })).toBeDefined()
@@ -129,4 +133,21 @@ test('shows the session cost and plan limits as they move', async ($, on) => {
   expect(await ui.find({ text: /\$3\.40 this session \(API-equivalent\)/ })).toBeDefined()
   expect(await ui.find({ text: /5-hour limit: 85% used/ })).toBeDefined()
   expect(await ui.find({ text: /Weekly limit: 13% used/ })).toBeDefined()
+})
+
+test('a subagent finishing logs nothing; an ask overtaken by a newer turn is dropped', async ($, on) => {
+  let calls = 0
+  world(on, () => (calls++, { done: ['Shipped it'], ask: 'Decide: ship now?' }))
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.turn.start({ text: 'ship it', turnId: 't1' })
+  await $.turn.complete(ended('Subagent report', 't1', 'agent-7'))
+  await settle()
+  expect(calls).toBe(0)
+
+  await $.turn.complete(ended('Ready. Ship now?', 't1'))
+  await $.turn.start({ text: '', turnId: 't2' })
+  await settle()
+  expect(await ui.find({ text: /✓ Shipped it/ })).toBeDefined()
+  expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
 })

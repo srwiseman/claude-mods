@@ -87,7 +87,7 @@ ${logged.length ? logged.map(d => `- ${d.text}`).join('\n') : '(empty)'}
 
 Reply with JSON only, no prose: {"done": [...], "ask": ...}
 
-"done": 0 to 2 results of THIS turn. Each is one past-tense sentence of at most 12 words saying what now exists or works and why it matters, in plain words anyone understands. Describe outcomes, never commands or files. Good: "Published the mod to GitHub so it installs on any machine". Bad: "Ran git push", "Edited register.tsx". Only things actually finished. Use [] when the turn only answered a question, investigated, or failed.
+"done": 0 to 2 results of THIS turn. Each is one past-tense sentence of at most 12 words saying what now exists or works and why it matters, in plain words anyone understands. Describe outcomes, never commands, file names, commit ids or test counts. Good: "Published the mod to GitHub so it installs on any machine". Bad: "Ran git push", "Edited register.tsx". Only things actually finished. Use [] when the turn only answered a question, investigated, or failed.
 
 "ask": if the final message asks the user to answer, decide, approve or do something, that ask as a to-do of at most 9 words starting with a verb, like "Decide: install mod as plugin or env var?". Otherwise null.`
 
@@ -125,8 +125,8 @@ const summarizeTurn = async (
 }
 
 export const register: Register = on => {
-  // Counts the person's prompts, so a summary that lands after they replied is dropped
-  let prompts = 0
+  // The main loop's latest turn, so a summary that lands after a newer turn began is dropped
+  let currentTurn = ''
   // This turn's request and what changed during it, read when the turn ends
   let request = ''
   let actions: string[] = []
@@ -187,8 +187,6 @@ export const register: Register = on => {
 
   // The person acted, so the "your move" items are settled
   on('prompt.submit', async ($, e, next) => {
-    prompts += 1
-    request = e.text
     await dropNeeds($, n => n.id === 'turn' || n.id === 'notify')
 
     return next(e)
@@ -254,6 +252,46 @@ export const register: Register = on => {
     }
   })
 
+  // Raised for the main loop only, however the turn began: a typed prompt, a wakeup, a task's notice
+  on('turn.start', async ($, e, next) => {
+    currentTurn = e.turnId
+    if (e.text) {
+      request = e.text
+    }
+    await dropNeeds($, n => n.id === 'turn')
+
+    return next(e)
+  })
+
+  // Every turn ends here in every kind of session, so the log is written from this
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId) {
+      return next(e)
+    }
+
+    const turnActions = actions
+    actions = []
+    const turnAtEnd = currentTurn
+    const answer = e.reason === 'answer' ? e.answer : ''
+    if (answer || turnActions.length) {
+      // Summarized in the background so the turn's end is not held up
+      void summarizeTurn($, request, turnActions, answer)
+        .then(async summary => {
+          if (summary.done.length) {
+            const at = await $.clock.now()
+            await update($, done, list => [...list, ...summary.done.map(text => ({ text, at }))].slice(-50))
+          }
+          await save($)
+          if (summary.ask && answer && currentTurn === turnAtEnd) {
+            await addNeed($, 'turn', summary.ask)
+          }
+        })
+        .catch(() => undefined)
+    }
+
+    return next(e)
+  })
+
   // Claude Code is waiting on the person (idle, or a permission dialog)
   on('classic.Notification', async ($, e, next) => {
     // Idle reminders repeat what the turn summary already says, so only real dialogs count
@@ -264,7 +302,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Each turn end carries the true list of scheduled and background work
+  // Where settings hooks run, each turn end carries the true list of scheduled and background work
   on('classic.Stop', async ($, e, next) => {
     // The turn is over, so no dialog from it is still open
     await dropNeeds($, n => n.id.startsWith('perm:') || n.id === 'notify')
@@ -278,26 +316,6 @@ export const register: Register = on => {
       label: `Running ${t.type}: ${oneLine(t.command ?? t.description, 45)}`,
     }))
     await update($, upcoming, () => [...crons, ...tasks])
-
-    // Summarized in the background so the turn's end is not held up
-    const message = e.last_assistant_message
-    const turnActions = actions
-    actions = []
-    if (message) {
-      const asked = prompts
-      void summarizeTurn($, request, turnActions, message)
-        .then(async summary => {
-          if (summary.done.length) {
-            const at = await $.clock.now()
-            await update($, done, list => [...list, ...summary.done.map(text => ({ text, at }))].slice(-50))
-          }
-          await save($)
-          if (summary.ask && asked === prompts) {
-            await addNeed($, 'turn', summary.ask)
-          }
-        })
-        .catch(() => undefined)
-    }
 
     return next(e)
   })
