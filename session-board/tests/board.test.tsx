@@ -82,6 +82,15 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
     if (e.tool === 'Bash' && e.command.startsWith('gh pr create')) {
       return { result: {}, text: 'https://github.com/acme/app/pull/60' } as never
     }
+    if (e.tool === 'Bash' && e.command === 'npm ci --broken') {
+      return { result: { stdout: '', stderr: 'npm ERR!', interrupted: false }, text: 'npm ERR!', isError: true } as never
+    }
+    if (e.tool === 'Bash' && e.run_in_background) {
+      return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg123' } } as never
+    }
+    if (e.tool === 'CronCreate') {
+      return { result: { id: 'cron1', humanSchedule: 'Today at 5pm', recurring: false } } as never
+    }
     if (e.tool === 'ScheduleWakeup') {
       return { result: { scheduledFor: Date.UTC(2026, 9, 6, 16, 0), clampedDelaySeconds: 1800, wasClamped: false } }
     }
@@ -467,4 +476,37 @@ test('a card stuck waiting for details gives way to the issue Claude reads', asy
   await $.tool.call({ tool: 'Bash', command: 'gh issue view 57', description: 'Read the issue' })
   await settle()
   expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+})
+
+test('Up next lines end when their work does, without the Stop hook', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  const shows = async (text: RegExp) => (await ui.find({ text })) !== undefined
+
+  // A background install: listed while it runs, gone when its notice arrives
+  await $.tool.call({ tool: 'Bash', command: 'npm ci', description: 'Install JS dependencies', run_in_background: true })
+  expect(await shows(/Running: Install JS dependencies/)).toBe(true)
+  await $.prompt.submit({ text: '<task-notification><task-id>bg123</task-id><status>completed</status></task-notification>', origin: { kind: 'task-notification' } } as never)
+  expect(await shows(/Install JS dependencies/)).toBe(false)
+
+  // One that failed to start never shows
+  await $.tool.call({ tool: 'Bash', command: 'npm ci --broken', description: 'Install broken deps', run_in_background: true })
+  expect(await shows(/Install broken deps/)).toBe(false)
+
+  // Stopped by Claude
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+  expect(await shows(/Start the dev server/)).toBe(true)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bg123' } as never)
+  expect(await shows(/Start the dev server/)).toBe(false)
+
+  // A wakeup and a one-shot cron, gone once they fire
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 1800, reason: 'check the CI run', prompt: 'check CI', noop: false })
+  await $.tool.call({ tool: 'CronCreate', cron: '0 17 * * *', prompt: 'post the release notes', recurring: false } as never)
+  expect(await shows(/Wake at .*check the CI run/)).toBe(true)
+  expect(await shows(/post the release notes/)).toBe(true)
+  await $.prompt.submit({ text: 'check CI', origin: { kind: 'scheduled-trigger' } } as never)
+  expect(await shows(/check the CI run/)).toBe(false)
+  expect(await shows(/post the release notes/)).toBe(true)
+  await $.prompt.submit({ text: 'post the release notes', origin: { kind: 'scheduled-trigger' } } as never)
+  expect(await shows(/post the release notes/)).toBe(false)
 })

@@ -328,6 +328,20 @@ const meter = (percent: number) => {
 const putUpcoming = async ($: EngineInterface, item: Upcoming) =>
   update($, upcoming, list => [...list.filter(u => u.id !== item.id), item])
 
+// Drops what has happened: background commands whose notice arrived, and crons and wakeups that fired
+const settleUpcoming = async ($: EngineInterface, isGone: (u: Upcoming) => boolean) =>
+  update($, upcoming, list => (list.some(isGone) ? list.filter(u => !isGone(u)) : list))
+
+// A notice or a fired prompt names its item by task id, by what it ran, or by the prompt it submits
+const mentions = (text: string, u: Upcoming) => {
+  const described = u.label.replace(/^Running:\s*/, '').replace(/…$/, '')
+  return (
+    (!!u.taskId && text.includes(u.taskId)) ||
+    (described.length >= 8 && text.includes(described)) ||
+    (!!u.prompt && text.trim().startsWith(u.prompt.trim().slice(0, 60)))
+  )
+}
+
 const TURN_PROMPT = (request: string, actions: string[], message: string, logged: Done[]) => `You keep a running log, for a non-programmer, of what an AI coding assistant accomplished in a session.
 
 The user's request this turn:
@@ -401,6 +415,8 @@ export const register: Register = on => {
       argumentHint: '<#123 | ENG-42 | link | text | clear>',
     })
     await restore($)
+    // Background lines from before task ids were tracked can never be matched to their notice
+    await settleUpcoming($, u => u.label.startsWith('Running:') && !u.taskId)
     await refreshSpend($)
     await markBase($)
     void prune($).catch(() => undefined)
@@ -483,6 +499,12 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     // Only the person names issues and answers asks: task notices, subagents, peers and wakeups pass through here too
     const isPerson = !e.origin || ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
+    // A background command's completion notice, or a cron or wakeup firing, ends its Up next line
+    if (e.origin?.kind === 'task-notification') {
+      await settleUpcoming($, u => !!u.taskId && mentions(e.text, u))
+    } else if (e.origin?.kind === 'scheduled-trigger') {
+      await settleUpcoming($, u => !u.isRecurring && !u.taskId && (u.id === 'wakeup' || mentions(e.text, u)))
+    }
     if (isPerson) {
       const ref = findIssueRef(e.text)
       if (ref) {
@@ -524,7 +546,18 @@ export const register: Register = on => {
     try {
       const ran = await next(e)
       if (ran.deny !== undefined || ran.isError) {
+        // A background command that never started leaves no Up next line
+        await settleUpcoming($, u => u.id === id && !u.taskId)
         return ran
+      }
+      if (e.tool === 'Bash' && e.run_in_background) {
+        const taskId = (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId
+        await update($, upcoming, list => list.map(u => (u.id === id ? { ...u, taskId } : u)))
+      }
+      // Claude stopping a background command ends its line too
+      if (e.tool === 'TaskStop') {
+        const stopped = JSON.stringify(e)
+        await settleUpcoming($, u => !!u.taskId && stopped.includes(u.taskId))
       }
 
       const input = e as unknown as Record<string, unknown>
@@ -563,8 +596,13 @@ export const register: Register = on => {
       }
 
       if (e.tool === 'CronCreate' && ran.result) {
-        const job = ran.result as { id: string; humanSchedule: string }
-        await putUpcoming($, { id: job.id, label: `${job.humanSchedule}: ${oneLine(e.prompt, 45)}` })
+        const job = ran.result as { id: string; humanSchedule: string; recurring?: boolean }
+        await putUpcoming($, {
+          id: job.id,
+          label: `${job.humanSchedule}: ${oneLine(e.prompt, 45)}`,
+          prompt: e.prompt,
+          isRecurring: job.recurring !== false,
+        })
       } else if (e.tool === 'CronDelete') {
         await update($, upcoming, list => list.filter(u => u.id !== e.id))
       } else if (e.tool === 'ScheduleWakeup' && ran.result) {
@@ -573,7 +611,7 @@ export const register: Register = on => {
           await update($, upcoming, list => list.filter(u => u.id !== 'wakeup'))
         } else {
           const at = wake.scheduledFor
-          await putUpcoming($, { id: 'wakeup', at, label: `Wake at ${clockTime(at)}: ${oneLine(e.reason, 45)}` })
+          await putUpcoming($, { id: 'wakeup', at, prompt: e.prompt, label: `Wake at ${clockTime(at)}: ${oneLine(e.reason, 45)}` })
         }
       }
 
@@ -596,6 +634,7 @@ export const register: Register = on => {
     await dropNeeds($, n => n.id === 'turn')
 
     const now = await $.clock.now()
+    await settleUpcoming($, u => u.at !== undefined && u.at <= now)
     await update($, live, () => ({ startedAt: now, now, request: oneLine(e.text, 70), steps: [], edits: 0, commands: 0 }))
     await retitle($)
     ticker?.cancel()
@@ -676,10 +715,9 @@ export const register: Register = on => {
       const ours = known.find(u => u.id === c.id || (u.id === 'wakeup' && !c.recurring))
       return ours ?? { id: c.id, label: `${c.schedule}${c.recurring ? ' (repeats)' : ''}: ${oneLine(c.prompt, 45)}` }
     })
-    const tasks: Upcoming[] = (e.background_tasks ?? []).map(t => ({
-      id: t.id,
-      label: `Running ${t.type}: ${oneLine(t.command ?? t.description, 45)}`,
-    }))
+    const tasks: Upcoming[] = (e.background_tasks ?? [])
+      .filter(t => /^(running|pending|in_progress)$/i.test(t.status))
+      .map(t => known.find(u => u.taskId === t.id) ?? { id: t.id, taskId: t.id, label: `Running: ${oneLine(t.command ?? t.description, 45)}` })
     await update($, upcoming, () => [...crons, ...tasks])
 
     return next(e)
