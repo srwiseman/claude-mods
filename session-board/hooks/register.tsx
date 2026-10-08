@@ -150,6 +150,47 @@ const refreshSpend = async ($: EngineInterface) => {
   }))
 }
 
+// git, in the session's folder; null outside a repository or where git fails
+const git = async ($: EngineInterface, args: string[]): Promise<string | null> => {
+  try {
+    const run = await $.process.run(['git', ...args], { cwd: await $.session.cwd(), timeoutMs: 10000 })
+    return run.exitCode === 0 ? run.stdout : null
+  } catch {
+    return null
+  }
+}
+
+// Notes the commit the session started from, once, so later counts are this session's changes alone
+const markBase = async ($: EngineInterface) => {
+  if ((await read($, activity)).baseSha) {
+    return
+  }
+  const sha = (await git($, ['rev-parse', 'HEAD']))?.trim()
+  if (sha) {
+    await update($, activity, a => ({ ...a, baseSha: sha }))
+  }
+}
+
+// Files that differ from the starting commit, committed or not, plus new files: edits made any way count
+const countFilesChanged = async ($: EngineInterface) => {
+  const base = (await read($, activity)).baseSha
+  if (!base) {
+    return
+  }
+  const changed = await git($, ['diff', '--name-only', base])
+  const added = await git($, ['ls-files', '--others', '--exclude-standard'])
+  if (changed === null || added === null) {
+    return
+  }
+  const files = new Set([...changed.split('\n'), ...added.split('\n')].filter(Boolean))
+  await update($, activity, a => ({ ...a, filesChanged: files.size }))
+}
+
+const filesLabel = (a: { edits: number; filesChanged?: number }) =>
+  a.filesChanged !== undefined
+    ? `${a.filesChanged} file${a.filesChanged === 1 ? '' : 's'} changed`
+    : `${a.edits} file edit${a.edits === 1 ? '' : 's'}`
+
 const tokenCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
@@ -246,6 +287,7 @@ export const register: Register = on => {
     })
     await restore($)
     await refreshSpend($)
+    await markBase($)
     void prune($).catch(() => undefined)
     void $.ui.open({ id: PANE, title: 'Session' })
 
@@ -269,6 +311,7 @@ export const register: Register = on => {
     if (e.reason === 'clear') {
       await update($, done, () => [])
       await update($, activity, () => ({ edits: 0, commands: 0 }))
+      await markBase($).catch(() => undefined)
       await update($, needs, () => [])
       await update($, upcoming, () => [])
       await update($, issue, () => null)
@@ -435,6 +478,7 @@ export const register: Register = on => {
     ticker = $.clock.every(15000, () => {
       void $.clock.now().then(at => update($, live, l => (l ? { ...l, now: at } : l)))
       void refreshSpend($).catch(() => undefined)
+      void countFilesChanged($).catch(() => undefined)
     })
 
     return next(e)
@@ -458,6 +502,7 @@ export const register: Register = on => {
     ticker?.cancel()
     ticker = undefined
     await update($, live, () => null)
+    await countFilesChanged($).catch(() => undefined)
 
     const turnActions = actions
     actions = []
@@ -553,7 +598,7 @@ export const register: Register = on => {
             <Text>{fit(`  ▸ ${now.current?.label ?? 'Thinking'}`)}</Text>
             {now.edits + now.commands > 0 && (
               <Text dimColor>
-                {fit(`  ${now.edits} file edit${now.edits === 1 ? '' : 's'} · ${now.commands} command${now.commands === 1 ? '' : 's'} so far`)}
+                {fit(`  ${now.commands} command${now.commands === 1 ? '' : 's'} so far · ${filesLabel(work)} this session`)}
               </Text>
             )}
           </Box>
@@ -579,9 +624,9 @@ export const register: Register = on => {
         {log.slice(-12).map(d => (
           <Text wrap="wrap">  ✓ {d.text}</Text>
         ))}
-        {work.edits + work.commands > 0 && (
+        {(work.edits + work.commands > 0 || (work.filesChanged ?? 0) > 0) && (
           <Text dimColor>
-            {fit(`  from ${work.edits} file edit${work.edits === 1 ? '' : 's'} and ${work.commands} command${work.commands === 1 ? '' : 's'}`)}
+            {fit(`  ${filesLabel(work)} · ${work.commands} command${work.commands === 1 ? '' : 's'} run`)}
           </Text>
         )}
         {log.length > 0 && (

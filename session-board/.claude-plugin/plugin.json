@@ -1,6 +1,6 @@
 {
   "name": "session-board",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A sidebar showing the issue you're on, what needs you, what's next, what got done, and what it cost",
   "types": "./types/index.d.ts"
 }

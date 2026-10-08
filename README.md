@@ -8,11 +8,11 @@ A **Session** pane beside the transcript with live sections:
 
 - **Working on**: the issue the session is on, as a title and one-line summary, with its pull request once one is opened. It picks the issue up when you name one in a prompt (an issue link, `#123`, `issue 123`, or a key like `ENG-42` next to the word issue/ticket/story/bug/task), when Claude reads one (`gh issue view`, a GitHub/Jira/Linear connector, or an issue link), or from `/issue <#123 | ENG-42 | link | pasted text | clear>`. GitHub issues are fetched with your own `gh`; other trackers fill in once Claude reads the issue.
 
-- **In progress**: while Claude works, how long the turn has run, what it is doing now, the last few steps it finished (from the short descriptions Claude gives its commands), and edit and command counts. Free: no model calls.
+- **In progress**: while Claude works, how long the turn has run, what it is doing now, the last few steps it finished (from the short descriptions Claude gives its commands), and command counts. Free: no model calls.
 - **Needs you**: permission dialogs actually shown to you (nothing in auto mode unless it asks), questions and plans waiting on you, and a few-word summary of what Claude's last message asks you to do. The count also shows in the status line.
 - **Up next**: scheduled wakeups, recurring jobs, and running background tasks.
 - **Cost**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), tokens used, and your plan's 5-hour and weekly limits. Where a setup reports no cost to mods, it says so instead of showing $0.00.
-- **Done this session**: plain-English results of each turn ("Published the mod to GitHub so it installs on any machine"), not a list of commands.
+- **Done this session**: files changed this session (counted with git from the commit the session started on, so edits made through shell commands count too), and plain-English results of each turn ("Published the mod to GitHub so it installs on any machine"), not a list of commands.
 
 Opens by itself in terminals 144+ columns wide; otherwise type `/board`.
 

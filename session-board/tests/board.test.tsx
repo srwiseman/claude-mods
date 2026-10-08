@@ -27,9 +27,16 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd } } }) as never)
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
   on('session.repo', () => ({ value: { root: '/repo', remote: 'https://github.com/acme/app.git', internal: false, name: null } }) as never)
+  on('session.cwd', () => ({ value: '/repo' }) as never)
   on('process.run', (_$, e) =>
     ({
-      value: e.argv.join(' ').startsWith('gh issue view 57')
+      value: e.argv.join(' ') === 'git rev-parse HEAD'
+        ? { exitCode: 0, stdout: 'abc123\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+        : e.argv.join(' ') === 'git diff --name-only abc123'
+        ? { exitCode: 0, stdout: 'src/cart.ts\nsrc/checkout.ts\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+        : e.argv.join(' ') === 'git ls-files --others --exclude-standard'
+        ? { exitCode: 0, stdout: 'src/checkout.test.ts\nsrc/cart.ts\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+        : e.argv.join(' ').startsWith('gh issue view 57')
         ? { exitCode: 0, stdout: JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
         : { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false },
     }) as never,
@@ -80,7 +87,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', props: PANE, requestId: 'session-board' })
     expect(await ui.find({ text: /✓ Fixed the login bug so users can sign in again/ })).toBeDefined()
-    expect(await ui.find({ text: /from 1 file edit and 1 command/ })).toBeDefined()
+    expect(await ui.find({ text: /1 file edit · 1 command run/ })).toBeDefined()
     expect(await ui.find({ text: /Wake at .*check the CI run/ })).toBeDefined()
     // Tool calls that no dialog was shown for (auto mode) never reach "Needs you"
     expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
@@ -112,7 +119,7 @@ test('the log is saved, restored after a restart, and reset by /clear', async ($
   await settle()
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
   expect(await ui.find({ text: /✓ Shipped the login fix/ })).toBeDefined()
-  expect(await ui.find({ text: /from 3 file edits and 2 commands/ })).toBeDefined()
+  expect(await ui.find({ text: /3 file edits · 2 commands run/ })).toBeDefined()
   expect(stored.has('board:old-session')).toBe(false)
 
   await $.turn.complete(ended('Added it.'))
@@ -222,7 +229,7 @@ test('shows live progress while a turn runs, and clears it when the turn ends', 
   await $.tool.call({ tool: 'Bash', command: 'npm test -- checkout', description: 'Run the checkout tests' })
   expect(await ui.find({ text: /✓ Run the checkout tests/ })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: /✓ Run the checkout tests/ })).length).toBe(1)
-  expect(await ui.find({ text: /1 file edit · 2 commands so far/ })).toBeDefined()
+  expect(await ui.find({ text: /2 commands so far · 1 file edit this session/ })).toBeDefined()
 
   await $.turn.complete(ended('Fixed it.'))
   await settle()
@@ -240,4 +247,18 @@ test('says the cost is not reported, with tokens, where the setup prices nothing
   await settle()
   expect(await ui.find({ text: /Not reported in this setup/ })).toBeDefined()
   expect(await ui.find({ text: /50k tokens used/ })).toBeDefined()
+})
+
+test('counts files changed with git, however Claude changed them', async ($, on) => {
+  world(on, () => ({ done: ['Fixed checkout totals'], ask: null }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.turn.start({ text: 'fix checkout totals', turnId: 't1' })
+  // Edited through the shell, as auto mode often does: no Edit tool call at all
+  await $.tool.call({ tool: 'Bash', command: "sed -i '' 's/a/b/' src/cart.ts", description: 'Fix the rounding in cart totals' })
+  await $.turn.complete(ended('Fixed.'))
+  await settle()
+
+  expect(await ui.find({ text: /3 files changed · 1 command run/ })).toBeDefined()
 })

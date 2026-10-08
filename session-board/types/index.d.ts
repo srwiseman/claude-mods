@@ -1,5 +1,6 @@
 export type Done = { text: string; at: number }
-export type Activity = { edits: number; commands: number }
+// edits counts the file tools alone; filesChanged is git's count since baseSha, however the files were changed
+export type Activity = { edits: number; commands: number; baseSha?: string; filesChanged?: number }
 export type Upcoming = { id: string; label: string; at?: number }
 export type Need = { id: string; label: string; at: number }
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
