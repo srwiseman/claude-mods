@@ -97,16 +97,19 @@ const prune = async ($: EngineInterface) => {
 }
 
 // Reads a GitHub issue with the person's own gh; null where gh is missing, logged out, or it is not GitHub
-const fetchGithubIssue = async ($: EngineInterface, ref: IssueRef): Promise<string | null> => {
+// Reads a GitHub issue with the person's own gh: its text; 'missing' when gh answered that there is no
+// such issue (a pull request's number, a typo); 'unavailable' where gh is absent, logged out, or it is not GitHub
+const fetchGithubIssue = async ($: EngineInterface, ref: IssueRef): Promise<string | 'missing' | 'unavailable'> => {
   const repo = await $.session.repo()
   if (!ref.number || (!ref.repo && !repo?.remote?.includes('github.com'))) {
-    return null
+    return 'unavailable'
   }
   try {
     const run = await $.process.run(githubIssueArgv(ref), { cwd: repo?.root, timeoutMs: 15000 })
-    return run.exitCode === 0 ? run.stdout : null
+    if (run.exitCode === 0) return run.stdout
+    return /could not resolve|not found|pull request/i.test(run.stderr) ? 'missing' : 'unavailable'
   } catch {
-    return null
+    return 'unavailable'
   }
 }
 
@@ -124,12 +127,27 @@ const summarizeIssue = async ($: EngineInterface, text: string, ref: IssueRef | 
 // Shows an issue by key at once, then fills in its summary from the tracker when gh can reach it
 const followIssue = async ($: EngineInterface, ref: IssueRef) => {
   const current = await read($, issue)
-  if (current?.key === ref.key && !current.isPending && !isBrokenIssue(current)) {
+  const isShowing = !!current && !current.isPending && !isBrokenIssue(current)
+  if (current?.key === ref.key && isShowing) {
     return
   }
-  await update($, issue, () => ({ key: ref.key, url: ref.url, title: '', summary: '', isPinned: true, isPending: true }))
+  // A lone #123 names an issue only while none is on the board
+  if (ref.isBare && isShowing) {
+    return
+  }
+  const pending: Issue = { key: ref.key, url: ref.url, title: '', summary: '', isPinned: true, isPending: true }
+  // The card on show stays until the new issue is confirmed
+  if (!isShowing) {
+    await update($, issue, () => pending)
+  }
   const text = await fetchGithubIssue($, ref)
-  if (text) {
+  if (text === 'missing') {
+    // Not an issue after all: keep what was there, or nothing
+    await update($, issue, now => (now?.isPending && now.key === ref.key ? (isShowing ? current : null) : now))
+  } else if (text === 'unavailable') {
+    // Another tracker, or no gh: the person named it, so show it by key until Claude reads it
+    if (isShowing) await update($, issue, () => pending)
+  } else {
     // gh's JSON carries the issue's address, so the board can link it
     let url = ref.url
     try {
@@ -166,7 +184,7 @@ const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null
   const at = await $.clock.now()
   await update($, issue, current => {
     // A pinned issue stays until the person names another; Claude reading a different one leaves it
-    if (current?.isPinned && !isPinned && current.key !== summary.key && !isBrokenIssue(current)) {
+    if (current?.isPinned && !isPinned && current.key !== summary.key && !isBrokenIssue(current) && !current.isPending) {
       return current
     }
     const pr = current?.key === summary.key ? current.pr : undefined
@@ -463,11 +481,15 @@ export const register: Register = on => {
 
   // The person acted, so the "your move" items are settled; a prompt naming an issue puts it on the board
   on('prompt.submit', async ($, e, next) => {
-    const ref = findIssueRef(e.text)
-    if (ref) {
-      void followIssue($, ref).catch(() => undefined)
+    // Only the person names issues and answers asks: task notices, subagents, peers and wakeups pass through here too
+    const isPerson = !e.origin || ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
+    if (isPerson) {
+      const ref = findIssueRef(e.text)
+      if (ref) {
+        void followIssue($, ref).catch(() => undefined)
+      }
+      await dropNeeds($, n => n.id === 'turn' || n.id === 'notify')
     }
-    await dropNeeds($, n => n.id === 'turn' || n.id === 'notify')
 
     return next(e)
   })

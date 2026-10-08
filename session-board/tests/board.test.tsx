@@ -405,3 +405,66 @@ test('drops a broken issue card saved by an earlier version', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
   expect(await ui.find({ text: /Unknown JSON field/ })).toBeUndefined()
 })
+
+test('reads the issue a person names, not numbers in PRs, steps or other messages', () => {
+  expect(findIssueRef('address the review on PR #60')).toBeNull()
+  expect(findIssueRef('see pull request #60 and step #2')).toBeNull()
+  expect(findIssueRef('look at #12 too')).toEqual({ key: '#12', number: 12, isBare: true })
+  expect(findIssueRef('now take issue 88')).toEqual({ key: '#88', number: 88 })
+})
+
+test('stays on the issue at hand when other numbers come up mid-task', async ($, on) => {
+  world(on, prompt =>
+    prompt.includes('issue tracker') ? { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500.', state: 'open' } : { done: [], ask: null },
+  )
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  const showing57 = async () => expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+
+  await $.prompt.submit({ text: 'take issue #57', origin: { kind: 'composer' } } as never)
+  await settle()
+  await showing57()
+
+  // A background task's notice, a PR number, and a stray #12 from the person
+  await $.prompt.submit({ text: 'Task finished: rebased onto #88 and pushed', origin: { kind: 'task-notification' } } as never)
+  await $.prompt.submit({ text: 'address the review on PR #60', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'also the flaky test from #12', origin: { kind: 'composer' } } as never)
+  await settle()
+  await showing57()
+
+  // Named clearly, but gh says there is no such issue (a PR's number): the card stays
+  await $.prompt.submit({ text: 'now take issue 99', origin: { kind: 'composer' } } as never)
+  await settle()
+  await showing57()
+  expect(await ui.find({ text: /Details appear/ })).toBeUndefined()
+
+  // Named clearly on another tracker: the board follows the person
+  await $.prompt.submit({ text: 'switch to the ENG-42 ticket', origin: { kind: 'composer' } } as never)
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /^ENG-42$/ })).toBeDefined()
+})
+
+test('a task notice does not clear what needs you', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' })
+  await $.prompt.submit({ text: 'Background build finished', origin: { kind: 'task-notification' } } as never)
+  expect(await ui.find({ text: /NEEDS YOU/ })).toBeDefined()
+  await $.prompt.submit({ text: 'ok', origin: { kind: 'composer' } } as never)
+  expect(await ui.find({ text: /NEEDS YOU/ })).toBeUndefined()
+})
+
+test('a card stuck waiting for details gives way to the issue Claude reads', async ($, on) => {
+  const stored = new Map<string, unknown>([
+    ['board:session-1', { done: [], activity: { edits: 0, commands: 0 }, issue: { key: '#88', title: '', summary: '', isPinned: true, isPending: true }, savedAt: NOW }],
+  ])
+  world(on, prompt =>
+    prompt.includes('issue tracker') ? { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500.', state: 'open' } : { done: [], ask: null },
+  stored)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ text: /Details appear/ })).toBeDefined()
+
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 57', description: 'Read the issue' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+})

@@ -1,12 +1,15 @@
 import type { Issue } from '../types'
 
 // A reference to an issue found in text: its key as people say it, and where it lives when known
-export type IssueRef = { key: string; url?: string; repo?: string; number?: number }
+// isBare: only a lone #123 named it, too weak to replace an issue already on the board
+export type IssueRef = { key: string; url?: string; repo?: string; number?: number; isBare?: boolean }
 
 const GITHUB_ISSUE_URL = /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)/
 const GITHUB_PR_URL = /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 const TRACKER_URL = /https?:\/\/[\w.-]*(?:linear\.app|atlassian\.net|jira\.[\w.-]+)\/\S*?\b([A-Z][A-Z0-9]+-\d+)\b\S*/
-const HASH_NUMBER = /(?:^|[\s(])#(\d{1,7})\b/
+const HASH_NUMBER = /(?:^|[\s(])#(\d{1,7})\b/g
+// Words that make a #123 a pull request, a step or a list item rather than an issue
+const NOT_ISSUE_BEFORE = /\b(?:pr|prs|pull|pull request|pull requests|mr|merge request|step|item|line|option|no|number|rank|comment)\s*$/i
 const ISSUE_NUMBER = /\b(?:issue|ticket|bug)\s+(?:number\s+|no\.?\s*)?#?(\d{1,7})\b/i
 const TRACKER_KEY = /\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b/
 const ISSUE_WORD = /\b(?:issue|ticket|story|bug|task|epic)s?\b/i
@@ -23,9 +26,15 @@ export const findIssueRef = (text: string): IssueRef | null => {
   if (tracker?.[1]) {
     return { key: tracker[1], url: tracker[0] }
   }
-  const numbered = text.match(ISSUE_NUMBER) ?? text.match(HASH_NUMBER)
-  if (numbered?.[1]) {
-    return { key: `#${numbered[1]}`, number: Number(numbered[1]) }
+  const named = text.match(ISSUE_NUMBER)
+  if (named?.[1]) {
+    return { key: `#${named[1]}`, number: Number(named[1]) }
+  }
+  for (const hash of text.matchAll(HASH_NUMBER)) {
+    const before = text.slice(0, hash.index ?? 0)
+    if (hash[1] && !NOT_ISSUE_BEFORE.test(before)) {
+      return { key: `#${hash[1]}`, number: Number(hash[1]), isBare: true }
+    }
   }
   const key = text.match(TRACKER_KEY)
   if (key?.[1] && !NOT_KEYS.test(key[1]) && ISSUE_WORD.test(text)) {
