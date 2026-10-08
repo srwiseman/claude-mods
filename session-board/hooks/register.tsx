@@ -681,8 +681,9 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {w && (
           <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-            <Text bold wrap="truncate-end">
-              {w.url ? <Link href={w.url} label={w.key} /> : w.key}
+            {/* Plain text: a terminal without link support draws a Link's URL inline, which would push the title out */}
+            <Text bold wrap="wrap">
+              {w.key}
               {w.isPending ? '' : ` ${w.title}`}
               {w.state === 'closed' ? ' · closed' : ''}
             </Text>
@@ -691,11 +692,20 @@ export const register: Register = on => {
             ) : (
               w.summary && <Text dimColor wrap="wrap">{w.summary}</Text>
             )}
-            {w.pr && (
-              <Box justifyContent="flex-end">
-                <Text color="green">
-                  <Link href={w.pr.url} label={`PR #${w.pr.number} ↗`} />
-                </Text>
+            {(w.url || w.pr) && (
+              <Box justifyContent="space-between" flexWrap="wrap" columnGap={2}>
+                {w.url ? (
+                  <Text dimColor>
+                    <Link href={w.url} label="Issue ↗" />
+                  </Text>
+                ) : (
+                  <Text> </Text>
+                )}
+                {w.pr && (
+                  <Text color="green">
+                    <Link href={w.pr.url} label={`PR #${w.pr.number} ↗`} />
+                  </Text>
+                )}
               </Box>
             )}
           </Box>
