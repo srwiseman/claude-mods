@@ -2,7 +2,18 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Activity, Done, Issue, Live, Need, Upcoming } from '../types'
-import { findIssueRef, findPrUrl, fingerprint, githubIssueArgv, isIssueRead, issuePrompt, issueRefFromRead, parseIssueReply } from './issue'
+import {
+  findIssueRef,
+  findPrUrl,
+  fingerprint,
+  githubIssueArgv,
+  isBrokenIssue,
+  isIssueRead,
+  issuePrompt,
+  issueRefFromRead,
+  looksLikeError,
+  parseIssueReply,
+} from './issue'
 import type { IssueRef } from './issue'
 
 const PANE = 'session-board'
@@ -70,7 +81,7 @@ const restore = async ($: EngineInterface) => {
     await update($, done, () => saved.done)
     await update($, activity, () => saved.activity)
   }
-  if (saved?.issue && !(await read($, issue))) {
+  if (saved?.issue && !isBrokenIssue(saved.issue) && !(await read($, issue))) {
     await update($, issue, () => saved.issue ?? null)
   }
 }
@@ -113,7 +124,7 @@ const summarizeIssue = async ($: EngineInterface, text: string, ref: IssueRef | 
 // Shows an issue by key at once, then fills in its summary from the tracker when gh can reach it
 const followIssue = async ($: EngineInterface, ref: IssueRef) => {
   const current = await read($, issue)
-  if (current?.key === ref.key && !current.isPending) {
+  if (current?.key === ref.key && !current.isPending && !isBrokenIssue(current)) {
     return
   }
   await update($, issue, () => ({ key: ref.key, url: ref.url, title: '', summary: '', isPinned: true, isPending: true }))
@@ -133,10 +144,14 @@ const followIssue = async ($: EngineInterface, ref: IssueRef) => {
 
 // Summarizes an issue's text onto the board, keeping a PR already linked to the same issue
 const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null, isPinned: boolean) => {
+  // A failed read prints an error, not an issue: never summarize one
+  if (looksLikeError(text)) {
+    return
+  }
   // Skip the model call when the summary is already on the board, or would be thrown away
   const current = await read($, issue)
   const hash = fingerprint(text.trim())
-  if (current && !current.isPending) {
+  if (current && !current.isPending && !isBrokenIssue(current)) {
     const isSameText = current.sourceHash === hash
     const isSameIssue = !isPinned && ref?.key === current.key
     const isOtherWhilePinned = !isPinned && current.isPinned && ref?.key !== undefined && ref.key !== current.key
@@ -151,7 +166,7 @@ const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null
   const at = await $.clock.now()
   await update($, issue, current => {
     // A pinned issue stays until the person names another; Claude reading a different one leaves it
-    if (current?.isPinned && !isPinned && current.key !== summary.key) {
+    if (current?.isPinned && !isPinned && current.key !== summary.key && !isBrokenIssue(current)) {
       return current
     }
     const pr = current?.key === summary.key ? current.pr : undefined
@@ -491,8 +506,10 @@ export const register: Register = on => {
       }
 
       const input = e as unknown as Record<string, unknown>
-      if (ran.text && isIssueRead(e.tool, input)) {
-        void learnIssue($, ran.text, issueRefFromRead(e.tool, input), false).catch(() => undefined)
+      if (isIssueRead(e.tool, input)) {
+        // gh prints the issue on stdout and its errors on stderr; the joined text would carry both
+        const text = e.tool === 'Bash' ? ((ran.result as { stdout?: string } | undefined)?.stdout ?? '') : (ran.text ?? '')
+        void learnIssue($, text, issueRefFromRead(e.tool, input), false).catch(() => undefined)
       }
       const opensPr =
         (e.tool === 'Bash' && /\bgh\s+pr\s+create\b/.test(e.command)) || /create_?pull_?request/i.test(e.tool)

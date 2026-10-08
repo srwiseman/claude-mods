@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, RenderPropsOf } from 'claude-code'
 
-import { findIssueRef, fingerprint, issueRefFromRead } from '../hooks/issue'
+import { findIssueRef, fingerprint, isBrokenIssue, issueRefFromRead, looksLikeError } from '../hooks/issue'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
 const settle = () => new Promise(r => setTimeout(r, 250))
@@ -63,10 +63,21 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   )
   on('tool.call', (_$, e) => {
     if (e.tool === 'Bash' && e.command.startsWith('gh issue view 57')) {
-      return { result: {}, text: 'title: Login fails after password reset\nstate: OPEN\nnumber: 57\n--\nUsers get a 500.' } as never
+      const out = 'title:\tLogin fails after password reset\nstate:\tOPEN\nnumber:\t57\n--\nUsers get a 500.'
+      return { result: { stdout: out, stderr: '', interrupted: false }, text: out } as never
     }
     if (e.tool === 'Bash' && e.command.startsWith('gh issue view 99')) {
-      return { result: {}, text: 'title: Unrelated dark mode request\nnumber: 99' } as never
+      const out = 'title:\tUnrelated dark mode request\nnumber:\t99'
+      return { result: { stdout: out, stderr: '', interrupted: false }, text: out } as never
+    }
+    if (e.tool === 'Bash' && e.command.startsWith('gh issue view 77')) {
+      // An older gh rejects a field; chained with `|| true` the call still reads as a success
+      const err = 'Unknown JSON field: "issueType"\nAvailable fields:\n  assignees\n  body\n  title'
+      return { result: { stdout: '', stderr: err, interrupted: false }, text: err } as never
+    }
+    if (e.tool === 'Bash' && e.command.startsWith('gh issue view 404')) {
+      const out = 'title:\tPage not found after login\nstate:\tOPEN\nnumber:\t404\n--\nError: users see a 404 page.'
+      return { result: { stdout: out, stderr: '', interrupted: false }, text: out } as never
     }
     if (e.tool === 'Bash' && e.command.startsWith('gh pr create')) {
       return { result: {}, text: 'https://github.com/acme/app/pull/60' } as never
@@ -351,4 +362,46 @@ test('shows a one-line band above the prompt while working and the pane is out o
 
   await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'git push', description: 'Push to GitHub' } } as never)
   expect(await band.find({ text: /⚑ Approve Bash: Push to GitHub/ })).toBeDefined()
+})
+
+test('tells error output from issues, including issues about errors', () => {
+  expect(looksLikeError('Unknown JSON field: "issueType"\nAvailable fields:\n  body')).toBe(true)
+  expect(looksLikeError('GraphQL: Could not resolve to an issue or pull request with the number of 9999.')).toBe(true)
+  expect(looksLikeError('To get started with GitHub CLI, please run:  gh auth login')).toBe(true)
+  expect(looksLikeError('{"error": "Not Found"}')).toBe(true)
+  expect(looksLikeError('')).toBe(true)
+  expect(looksLikeError('title:\tPage not found after login\nstate:\tOPEN\n--\nError: 404')).toBe(false)
+  expect(looksLikeError('{"number": 12, "title": "Error: request failed", "body": "..."}')).toBe(false)
+  expect(isBrokenIssue({ title: 'Unknown JSON field issueType', summary: '' })).toBe(true)
+  expect(isBrokenIssue({ title: 'Page not found after login', summary: 'Users see a 404.' })).toBe(false)
+})
+
+test('never puts a failed read on the board, but still reads issues about errors', async ($, on) => {
+  let issueCalls = 0
+  world(on, prompt => {
+    if (!prompt.includes('issue tracker')) return { done: [], ask: null }
+    issueCalls++
+    return { key: '#404', title: 'Page not found after login', summary: 'Users see a 404 after signing in.', state: 'open' }
+  })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 77 --json title,issueType || true', description: 'Read the issue' })
+  await settle()
+  expect(issueCalls).toBe(0)
+  expect(await ui.find({ text: /Unknown JSON field/ })).toBeUndefined()
+
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 404', description: 'Read the issue' })
+  await settle()
+  expect(issueCalls).toBe(1)
+  expect(await ui.find({ type: 'Text', text: /^#404 Page not found after login$/ })).toBeDefined()
+})
+
+test('drops a broken issue card saved by an earlier version', async ($, on) => {
+  const stored = new Map<string, unknown>([
+    ['board:session-1', { done: [], activity: { edits: 0, commands: 0 }, issue: { key: '#77', title: 'Unknown JSON field issueType', summary: '' }, savedAt: NOW }],
+  ])
+  world(on, () => ({ done: [], ask: null }), stored)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ text: /Unknown JSON field/ })).toBeUndefined()
 })

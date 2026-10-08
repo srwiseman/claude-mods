@@ -73,6 +73,25 @@ export const issueRefFromRead = (tool: string, input: Record<string, unknown>): 
   return null
 }
 
+// Text a failed read prints instead of an issue: a CLI or API error, an auth prompt, a miss
+const ERROR_TEXT = /unknown json field|graphql:|\bhttp [45]\d\d\b|could not resolve|not found|no such|^error\b|\berror:|failed to|authentication|gh auth login|rate limit|permission denied|bad credentials|requires authentication/i
+
+export const looksLikeError = (text: string): boolean => {
+  const trimmed = text.trim()
+  if (!trimmed) return true
+  // JSON from gh --json or a connector: an error object only when it carries no title
+  if (trimmed.startsWith('{')) return /^\{\s*"(error|errors|message)"\s*:/.test(trimmed) && !/"title"\s*:/.test(trimmed)
+  // gh issue view's own layout opens with the title: a real issue, whatever it is about
+  if (/^title:\s/im.test(trimmed)) return false
+  return trimmed.length < 600 && ERROR_TEXT.test(trimmed)
+}
+
+// Only an unmistakable CLI failure: a real issue may well be about errors or missing pages
+const CLI_FAILURE = /unknown json field|graphql:|gh auth login|bad credentials|requires authentication|could not resolve to an? (issue|repository)/i
+
+// An issue the board took in from an error before reads were checked, kept from showing on
+export const isBrokenIssue = (issue: Pick<Issue, 'title' | 'summary'>): boolean => CLI_FAILURE.test(`${issue.title} ${issue.summary}`)
+
 // A short fingerprint of an issue's text, so the same text is never summarized twice
 export const fingerprint = (text: string): string => {
   let hash = 0x811c9dc5
@@ -98,7 +117,9 @@ export const githubIssueArgv = (ref: IssueRef): string[] => {
 
 export const issuePrompt = (hint: string, text: string) => `Below is an issue (a bug report, feature request or task) from an issue tracker${hint ? `, known as ${hint}` : ''}.
 
-Reply with JSON only, no prose:
+If the text is not an issue at all (an error message, an empty result, a list of many issues), reply exactly {"title": null}.
+
+Otherwise reply with JSON only, no prose:
 {"key": the issue's id as people write it (like "#123" or "ENG-42"), or null if none is shown,
  "title": what the issue is about in at most 8 words,
  "summary": one plain sentence of at most 22 words: the problem or ask, and what done looks like,
