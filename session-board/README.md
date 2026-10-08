@@ -3,38 +3,44 @@
 A **Session** pane beside the Claude Code transcript that shows, at a glance, what you're working on, what's happening, what needs you, and what got done.
 
 ```
-Working on #57 · open
-  Login fails after password reset
-  Users hit a 500 after a reset; done when they can sign in.
-  PR #60 opened
+╭ #57 Login fails after password reset ────╮
+│ Users hit a 500 after a reset; done when │
+│ they can sign in.              PR #60 ↗  │
+╰──────────────────────────────────────────╯
 
-In progress · 12m
-  ✓ Run the checkout tests
-  ▸ Push branch and open PR
+ ⚑ NEEDS YOU
+   Approve Bash: git push --force
 
-Needs you (1)
-  ⚑ Decide: merge now or wait for review?
+ ● Working · 12m
+   ✓ Run the checkout tests
+   ▸ Push branch and open PR
 
-Done this session (2)
-  ✓ Fixed the login error after password resets
-  ✓ Opened a pull request with the fix and tests
-  3 files changed · 26 commands run
+ Done  ·  3 files changed · 26 commands
+   ✓ Fixed login after password resets
+   ✓ Added a regression test for resets
+   + 4 earlier
 
-Cost
-  $1.84 this session
-  210k tokens used
+ ───────────────────────────────────────
+ $1.84 · 210k tok        5h ▓▓▓░░░░░ 42%
+                         [ Copy summary ]
+```
+
+Sections only appear when they have something to say. When the pane is closed, or the terminal is too narrow for it, the same picture shrinks to one line above the prompt while Claude works or something needs you:
+
+```
+#57 Login fails · ● Push branch and open PR · 12m · ⚑ Approve git push · $1.84
 ```
 
 ## Sections
 
-- **Working on**: the issue the session is on, as a title and one-line summary, with links to the issue and to its pull request once one is opened. It picks the issue up when you name one in a prompt (an issue link, `#123`, `issue 123`, or a key like `ENG-42` next to the word issue/ticket/story/bug/task), when Claude reads one (`gh issue view`, a GitHub/Jira/Linear connector, or an issue link), or from `/issue <#123 | ENG-42 | link | pasted text | clear>`. An issue you name stays on top while Claude reads related ones. GitHub issues are fetched with your own `gh`; other trackers fill in once Claude reads the issue.
-- **In progress**: while Claude works, how long the turn has run, what it is doing now, the last few steps it finished (from the short descriptions Claude gives its commands), and a command count. No model calls.
-- **Needs you**: permission dialogs actually shown to you (none in auto mode unless it asks), questions and plans waiting on you, and a few-word summary of what Claude's last message asks you to do. The count also shows in the status line.
-- **Up next**: scheduled wakeups, recurring jobs, and running background tasks.
-- **Done this session**: plain-English results of each turn ("Opened a pull request with the fix and tests"), not a list of commands, and the files changed this session (counted with git from the commit the session started on, so edits made through shell commands count too).
-- **Cost**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), tokens used, and your plan's 5-hour and weekly limits. Where a setup reports no cost to mods, it says so instead of showing $0.00.
+- **Issue card**: the issue the session is on, as a title and one-line summary, with links to the issue and to its pull request once one is opened. It picks the issue up when you name one in a prompt (an issue link, `#123`, `issue 123`, or a key like `ENG-42` next to the word issue/ticket/story/bug/task), when Claude reads one (`gh issue view`, a GitHub/Jira/Linear connector, or an issue link), or from `/issue <#123 | ENG-42 | link | pasted text | clear>`. An issue you name stays while Claude reads related ones. GitHub issues are fetched with your own `gh`; other trackers fill in once Claude reads the issue.
+- **⚑ Needs you**: shown only when something is waiting on you: a permission dialog actually put to you (none in auto mode unless it asks), a question or plan to approve, or a few-word summary of what Claude's last message asks you to do. The count also shows in the status line and the pane's title.
+- **Status**: `● Working · 12m` with the last steps finished (from the short descriptions Claude gives its commands) and the one under way; `○ Idle` otherwise. Scheduled wakeups, recurring jobs and background tasks show beneath it as `⏱` lines. No model calls.
+- **Done**: plain-English results of each turn ("Fixed login after password resets"), not a list of commands, newest three with `+ N earlier` to expand; hover one for when it happened and what it took. The header counts files changed this session (with git, from the commit the session started on, so edits made through shell commands count) and commands run.
+- **Footer**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), tokens used, and your nearest usage limit as a meter, yellow from 80%. Where a setup reports no cost to mods, it says so instead of showing $0.00.
+- **Copy summary** (or `c` while the pane has focus): copies the issue, PR link, Done list and totals as a short write-up for a PR description, standup or status message.
 
-The pane opens by itself in terminals 144+ columns wide; otherwise type `/board`. Links are clickable in terminals that support them (iTerm2, Ghostty, WezTerm, Kitty, VS Code's terminal) and in the Desktop app.
+The pane opens by itself in terminals 144+ columns wide; otherwise type `/board`, or rely on the band above the prompt. Links are clickable in terminals that support them (iTerm2, Ghostty, WezTerm, Kitty, VS Code's terminal) and in the Desktop app. Hover details need mouse support (Claude Code's fullscreen layout, or the Desktop app).
 
 ## Install
 

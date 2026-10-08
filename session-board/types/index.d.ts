@@ -1,4 +1,5 @@
-export type Done = { text: string; at: number }
+// detail: what the turn took (commands, files), shown when the line is hovered
+export type Done = { text: string; at: number; detail?: string }
 // edits counts the file tools alone; filesChanged is git's count since baseSha, however the files were changed
 export type Activity = { edits: number; commands: number; baseSha?: string; filesChanged?: number }
 export type Upcoming = { id: string; label: string; at?: number }
@@ -34,6 +35,6 @@ export type Issue = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'session-board': { done: Done[]; activity: Activity; upcoming: Upcoming[]; needs: Need[]; spend: Spend; issue: Issue | null; live: Live | null }
+    'session-board': { done: Done[]; activity: Activity; upcoming: Upcoming[]; needs: Need[]; spend: Spend; issue: Issue | null; live: Live | null; isExpanded: boolean }
   }
 }

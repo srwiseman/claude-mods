@@ -13,6 +13,10 @@ const needs = atom({ plugin: 'session-board', key: 'needs' } as const, [])
 const spend = atom({ plugin: 'session-board', key: 'spend' } as const, { limits: [] })
 const issue = atom({ plugin: 'session-board', key: 'issue' } as const, null as Issue | null)
 const live = atom({ plugin: 'session-board', key: 'live' } as const, null as Live | null)
+const expanded = atom({ plugin: 'session-board', key: 'isExpanded' } as const, false)
+
+// Where the pane stands: the band shows only while the board itself is out of sight
+const pane = { closedByPerson: false, isSeen: false, title: 'Session' }
 
 // The last two parts of a path, enough to say which file without the person's folders
 const shortPath = (path: unknown) => String(path ?? '').split('/').slice(-2).join('/') || 'a file'
@@ -233,6 +237,59 @@ const dropNeeds = async ($: EngineInterface, test: (n: Need) => boolean) => {
 const showNeedCount = async ($: EngineInterface) => {
   const count = (await read($, needs)).length
   $.ui.status(count > 0 ? `⚑ ${count} need${count === 1 ? 's' : ''} you` : undefined)
+  await retitle($)
+}
+
+// The pane's title carries the board's state, so even a glance at its header says something
+const retitle = async ($: EngineInterface) => {
+  if (pane.closedByPerson) {
+    return
+  }
+  const waiting = (await read($, needs)).length
+  const title = waiting ? `Session · ⚑ ${waiting}` : (await read($, live)) ? 'Session · working' : 'Session'
+  if (title !== pane.title) {
+    pane.title = title
+    void $.ui.open({ id: PANE, title })
+  }
+}
+
+// The session as a short write-up: for a PR description, a standup, or a status message
+const summaryText = async ($: EngineInterface) => {
+  const working = await read($, issue)
+  const log = await read($, done)
+  const work = await read($, activity)
+  const cost = await read($, spend)
+  const lines: string[] = []
+  if (working) {
+    lines.push(`${working.key}${working.title ? ` ${working.title}` : ''}${working.url ? ` (${working.url})` : ''}`)
+    if (working.pr) lines.push(`PR #${working.pr.number}: ${working.pr.url}`)
+    lines.push('')
+  }
+  if (log.length) {
+    lines.push('Done:', ...log.map(d => `- ${d.text}`), '')
+  }
+  const facts = [filesLabel(work), `${work.commands} command${work.commands === 1 ? '' : 's'}`]
+  if (cost.usd) facts.push(money(cost.usd))
+  lines.push(facts.join(' · '))
+  return lines.join('\n').trim()
+}
+
+// Everything a drawing reads, read once; each read subscribes the drawing to that value
+const readBoard = async ($: EngineInterface) => ({
+  log: await read($, done),
+  work: await read($, activity),
+  next: await read($, upcoming),
+  waiting: await read($, needs),
+  cost: await read($, spend),
+  working: await read($, issue),
+  now: await read($, live),
+  isExpanded: await read($, expanded),
+})
+
+const LIMIT_SHORT: Record<string, string> = { five_hour: '5h', seven_day: 'week', spend_limit: 'spend' }
+const meter = (percent: number) => {
+  const filled = Math.max(0, Math.min(8, Math.round(percent / 12.5)))
+  return '▓'.repeat(filled) + '░'.repeat(8 - filled)
 }
 
 const putUpcoming = async ($: EngineInterface, item: Upcoming) =>
@@ -314,7 +371,7 @@ export const register: Register = on => {
     await refreshSpend($)
     await markBase($)
     void prune($).catch(() => undefined)
-    void $.ui.open({ id: PANE, title: 'Session' })
+    void $.ui.open({ id: PANE, title: pane.title })
 
     return next(e)
   })
@@ -348,21 +405,23 @@ export const register: Register = on => {
   })
 
   // Another pane (the diff panel, say) closing brings the board back, unless the person closed it
-  let closedByPerson = false
   on('ui.close', async ($, e, next) => {
     const closed = await next(e)
     if (e.id === PANE) {
-      closedByPerson = e.origin.kind === 'person'
-    } else if (!closedByPerson) {
-      void $.ui.open({ id: PANE, title: 'Session' })
+      pane.closedByPerson = e.origin.kind === 'person'
+      pane.isSeen = false
+      // The band takes over while the pane is gone
+      $.ui.invalidate('ui.render')
+    } else if (!pane.closedByPerson) {
+      void $.ui.open({ id: PANE, title: pane.title })
     }
 
     return closed
   })
 
   on('command.run', { command: 'board' }, async $ => {
-    closedByPerson = false
-    await $.ui.open({ id: PANE, title: 'Session' })
+    pane.closedByPerson = false
+    await $.ui.open({ id: PANE, title: pane.title })
 
     return { text: 'Session board opened.' }
   })
@@ -499,6 +558,7 @@ export const register: Register = on => {
 
     const now = await $.clock.now()
     await update($, live, () => ({ startedAt: now, now, request: oneLine(e.text, 70), steps: [], edits: 0, commands: 0 }))
+    await retitle($)
     ticker?.cancel()
     ticker = $.clock.every(15000, () => {
       void $.clock.now().then(at => update($, live, l => (l ? { ...l, now: at } : l)))
@@ -527,11 +587,17 @@ export const register: Register = on => {
     ticker?.cancel()
     ticker = undefined
     await update($, live, () => null)
+    await retitle($)
     await countFilesChanged($).catch(() => undefined)
 
     const turnActions = actions
     actions = []
     const turnAtEnd = currentTurn
+    const ran = turnActions.filter(a => a.startsWith('ran:')).length
+    const touched = new Set(turnActions.filter(a => /^(edited|wrote) /.test(a)).map(a => a.replace(/^\w+ /, ''))).size
+    const detail = [ran && `${ran} command${ran === 1 ? '' : 's'}`, touched && `${touched} file${touched === 1 ? '' : 's'} edited`]
+      .filter(Boolean)
+      .join(' · ')
     const answer = e.reason === 'answer' ? e.answer : ''
     if (answer || turnActions.length) {
       // Summarized in the background so the turn's end is not held up
@@ -539,7 +605,7 @@ export const register: Register = on => {
         .then(async summary => {
           if (summary.done.length) {
             const at = await $.clock.now()
-            await update($, done, list => [...list, ...summary.done.map(text => ({ text, at }))].slice(-50))
+            await update($, done, list => [...list, ...summary.done.map(text => ({ text, at, detail: detail || undefined }))].slice(-50))
           }
           await save($)
           if (summary.ask && answer && currentTurn === turnAtEnd) {
@@ -581,116 +647,202 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    pane.isSeen = true
     const { Box, Text, Button, Link } = $.ui.resolve(e)
-    const width = Math.max(20, (e.props.bodyColumns ?? 40) - 2)
-    const fit = (text: string) => (text.length > width ? text.slice(0, width - 1) + '…' : text)
-
-    const log = await read($, done)
-    const work = await read($, activity)
-    const next = await read($, upcoming)
-    const waiting = await read($, needs)
-    const cost = await read($, spend)
-    const working = await read($, issue)
-    const now = await read($, live)
-    // Usage windows only come with a subscription, where the dollar figure is what the API would charge
-    const isPlan = cost.limits.some(l => l.kind !== 'spend_limit')
+    const b = await readBoard($)
+    const width = Math.max(20, (e.props.bodyColumns ?? 40) - 1)
+    const isPlan = b.cost.limits.some(l => l.kind !== 'spend_limit')
+    const limit = [...b.cost.limits].sort((x, y) => y.percentUsed - x.percentUsed)[0]
+    const shown = b.isExpanded ? b.log.slice(-12) : b.log.slice(-3)
+    const hidden = b.log.length - shown.length
+    const hasCost = b.cost.usd !== undefined || b.cost.isUnpriced || limit !== undefined
+    const isEmpty = !b.working && !b.now && !b.waiting.length && !b.log.length && !b.next.length
+    const w = b.working
+    const tokens = (b.cost.tokens ?? 0) > 0 ? ` · ${tokenCount(b.cost.tokens ?? 0)} tok` : ''
 
     return (
-      <Box flexDirection="column">
-        {working && (
-          <Box flexDirection="column" marginBottom={1}>
-            <Text bold color="cyan">
-              Working on {working.url ? <Link href={working.url} label={working.key} /> : working.key}
-              {working.state ? ` · ${working.state}` : ''}
+      <Box flexDirection="column" gap={1}>
+        {w && (
+          <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+            <Text bold wrap="truncate-end">
+              {w.url ? <Link href={w.url} label={w.key} /> : w.key}
+              {w.isPending ? '' : ` ${w.title}`}
+              {w.state === 'closed' ? ' · closed' : ''}
             </Text>
-            {working.isPending ? (
-              <Text dimColor wrap="wrap">  Details appear once Claude reads the issue.</Text>
+            {w.isPending ? (
+              <Text dimColor wrap="wrap">Details appear once Claude reads the issue.</Text>
             ) : (
-              <>
-                <Text wrap="wrap">  {working.title}</Text>
-                {working.summary && <Text dimColor wrap="wrap">  {working.summary}</Text>}
-              </>
+              w.summary && <Text dimColor wrap="wrap">{w.summary}</Text>
             )}
-            {working.pr && (
-              <Text color="green">
+            {w.pr && (
+              <Box justifyContent="flex-end">
+                <Text color="green">
+                  <Link href={w.pr.url} label={`PR #${w.pr.number} ↗`} />
+                </Text>
+              </Box>
+            )}
+          </Box>
+        )}
+
+        {b.waiting.length > 0 && (
+          <Box flexDirection="column">
+            <Text bold inverse color="yellow">
+              {' ⚑ NEEDS YOU '}
+            </Text>
+            {b.waiting.map(n => (
+              <Text color="yellow" wrap="truncate-end">
                 {'  '}
-                <Link href={working.pr.url} label={`PR #${working.pr.number} opened`} />
+                {n.label}
               </Text>
-            )}
-          </Box>
-        )}
-        {now && (
-          <Box flexDirection="column" marginBottom={1}>
-            <Text bold color="magenta">In progress · {elapsed(now.now - now.startedAt)}</Text>
-            {!working && now.request && <Text dimColor wrap="wrap">  “{now.request}”</Text>}
-            {now.steps.slice(-4).map(step => (
-              <Text dimColor>{fit(`  ✓ ${step}`)}</Text>
             ))}
-            <Text>{fit(`  ▸ ${now.current?.label ?? 'Thinking'}`)}</Text>
-            {now.edits + now.commands > 0 && (
-              <Text dimColor>
-                {fit(`  ${now.commands} command${now.commands === 1 ? '' : 's'} so far · ${filesLabel(work)} this session`)}
+          </Box>
+        )}
+
+        {(b.now || !isEmpty) && (
+          <Box flexDirection="column">
+            {b.now ? (
+              <Box flexDirection="column">
+                <Text bold>● Working · {elapsed(b.now.now - b.now.startedAt)}</Text>
+                {!w && b.now.request ? (
+                  <Text dimColor wrap="truncate-end">
+                    {'  “'}
+                    {b.now.request}”
+                  </Text>
+                ) : null}
+                {b.now.steps.slice(-3).map(step => (
+                  <Text dimColor wrap="truncate-end">
+                    {'  ✓ '}
+                    {step}
+                  </Text>
+                ))}
+                <Text wrap="truncate-end">
+                  {'  ▸ '}
+                  {b.now.current?.label ?? 'Thinking'}
+                </Text>
+              </Box>
+            ) : (
+              <Text dimColor={!b.waiting.length}>{b.waiting.length ? '○ Idle · waiting on you' : '○ Idle'}</Text>
+            )}
+            {b.next.map(u => (
+              <Text dimColor wrap="truncate-end">
+                {'  ⏱ '}
+                {u.label}
               </Text>
+            ))}
+          </Box>
+        )}
+
+        {b.log.length > 0 && (
+          <Box flexDirection="column">
+            <Text wrap="truncate-end">
+              <Text bold color="green">
+                Done
+              </Text>
+              <Text dimColor>
+                {'  ·  '}
+                {filesLabel(b.work)} · {b.work.commands} command{b.work.commands === 1 ? '' : 's'}
+              </Text>
+            </Text>
+            {shown.map((d, i) => (
+              <Box key={`done-${i}`}>
+                <Text wrap="wrap">
+                  <Text color="green">{'  ✓ '}</Text>
+                  {d.text}
+                </Text>
+                <Box position="absolute" top={-1} left={4} display="none" hover={{ display: 'flex' }} backgroundColor="gray" paddingX={1}>
+                  <Text color="white">
+                    {clockTime(d.at)}
+                    {d.detail ? ` · ${d.detail}` : ''}
+                  </Text>
+                </Box>
+              </Box>
+            ))}
+            {hidden > 0 && <Button key="more" plain dimColor label={`  + ${hidden} earlier`} onPress={() => update($, expanded, () => true)} />}
+            {b.isExpanded && b.log.length > 3 && (
+              <Button key="less" plain dimColor label="  Show fewer" onPress={() => update($, expanded, () => false)} />
             )}
           </Box>
         )}
-        <Text bold color={waiting.length ? 'yellow' : undefined}>
-          Needs you ({waiting.length})
+
+        {isEmpty && !b.now && (
+          <Text dimColor wrap="wrap">
+            Nothing yet. Name an issue (/issue #123) or start working, and the board fills in.
+          </Text>
+        )}
+
+        {(hasCost || b.log.length > 0 || w) && (
+          <Box flexDirection="column">
+            {hasCost && (
+              <Box flexDirection="column">
+                <Text dimColor>{'─'.repeat(width)}</Text>
+                <Box justifyContent="space-between">
+                  <Text dimColor wrap="truncate-end">
+                    {b.cost.isUnpriced
+                      ? `cost not reported${tokens}`
+                      : b.cost.usd !== undefined
+                        ? `${money(b.cost.usd)}${isPlan ? ' API-equiv.' : ''}${tokens}`
+                        : `no cost yet${tokens}`}
+                  </Text>
+                  {limit && (
+                    <Text color={limit.percentUsed >= 80 ? 'yellow' : undefined} dimColor={limit.percentUsed < 80}>
+                      {`${LIMIT_SHORT[limit.kind] ?? limit.kind} ${meter(limit.percentUsed)} ${Math.round(limit.percentUsed)}%`}
+                    </Text>
+                  )}
+                </Box>
+              </Box>
+            )}
+            {(b.log.length > 0 || w) && (
+              <Box justifyContent="flex-end" marginTop={hasCost ? 1 : 0}>
+                <Button
+                  key="copy"
+                  label="Copy summary"
+                  hotkey="c"
+                  onPress={async press => {
+                    const copied = await $.ui.copy({ text: await summaryText($), surface: press.surface })
+                    $.ui.toast(copied.isCopied ? 'Session summary copied' : `Couldn't copy (${copied.reason})`)
+                  }}
+                />
+              </Box>
+            )}
+          </Box>
+        )}
+      </Box>
+    )
+  })
+
+  // One line above the prompt while something is happening and the pane is out of sight
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const b = await readBoard($)
+    if (pane.isSeen || e.props.hasSurvey || (!b.now && !b.waiting.length)) {
+      return next(e)
+    }
+    const { Box, Text } = $.ui.resolve(e)
+    const first = b.waiting[0]
+
+    return (
+      <Box>
+        <Text wrap="truncate-end">
+          {b.working && (
+            <Text color="cyan">
+              {b.working.key}
+              {b.working.title ? ` ${b.working.title}` : ''}
+              {' · '}
+            </Text>
+          )}
+          {b.now ? (
+            <Text>
+              ● {b.now.current?.label ?? 'Working'} · {elapsed(b.now.now - b.now.startedAt)}
+            </Text>
+          ) : (
+            <Text dimColor>○ Idle</Text>
+          )}
+          {first && (
+            <Text bold color="yellow">
+              {` · ⚑ ${b.waiting.length > 1 ? `${b.waiting.length} need you: ` : ''}${first.label}`}
+            </Text>
+          )}
+          {b.cost.usd ? <Text dimColor>{` · ${money(b.cost.usd)}`}</Text> : null}
         </Text>
-        {waiting.length === 0 && <Text dimColor>  Nothing, carry on.</Text>}
-        {waiting.map(n => (
-          <Text color="yellow">{fit(`  ⚑ ${n.label}`)}</Text>
-        ))}
-
-        <Text> </Text>
-        <Text bold>Up next ({next.length})</Text>
-        {next.length === 0 && <Text dimColor>  Nothing scheduled.</Text>}
-        {next.map(u => (
-          <Text>{fit(`  ⏱ ${u.label}`)}</Text>
-        ))}
-
-        <Text> </Text>
-        <Text bold>Done this session ({log.length})</Text>
-        {log.length === 0 && <Text dimColor>  Nothing finished yet.</Text>}
-        {log.slice(-12).map(d => (
-          <Text wrap="wrap">  ✓ {d.text}</Text>
-        ))}
-        {(work.edits + work.commands > 0 || (work.filesChanged ?? 0) > 0) && (
-          <Text dimColor>
-            {fit(`  ${filesLabel(work)} · ${work.commands} command${work.commands === 1 ? '' : 's'} run`)}
-          </Text>
-        )}
-        {log.length > 0 && (
-          <Box marginTop={1}>
-            <Button
-              key="clear"
-              label="Clear log"
-              onPress={async () => {
-                await update($, done, () => [])
-                await save($)
-              }}
-            />
-          </Box>
-        )}
-
-        <Text> </Text>
-        <Text bold>Cost</Text>
-        {cost.isUnpriced ? (
-          <Text dimColor>{fit('  Not reported in this setup')}</Text>
-        ) : cost.usd === undefined ? (
-          <Text dimColor>  No figure yet.</Text>
-        ) : (
-          <Text>{fit(`  ${money(cost.usd)} this session${isPlan ? ' (API-equivalent)' : ''}`)}</Text>
-        )}
-        {(cost.tokens ?? 0) > 0 && <Text dimColor>{fit(`  ${tokenCount(cost.tokens ?? 0)} tokens used`)}</Text>}
-        {cost.limits.map(l => (
-          <Text color={l.percentUsed >= 80 ? 'yellow' : undefined} dimColor={l.percentUsed < 80}>
-            {fit(
-              `  ${LIMIT_NAMES[l.kind] ?? l.kind}: ${Math.round(l.percentUsed)}% used` +
-                (l.resetsAt ? `, resets ${clockTime(Date.parse(l.resetsAt))}` : ''),
-            )}
-          </Text>
-        ))}
       </Box>
     )
   })

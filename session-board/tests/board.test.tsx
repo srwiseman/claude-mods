@@ -4,15 +4,21 @@ import type { On, RenderPropsOf } from 'claude-code'
 import { findIssueRef, fingerprint, issueRefFromRead } from '../hooks/issue'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
-const settle = () => new Promise(r => setTimeout(r, 50))
+const settle = () => new Promise(r => setTimeout(r, 250))
 const USAGE = { input_tokens: 1200, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 48500, model: 'claude-opus-5-5' }
 const ended = (answer: string, turnId = 't1', agentId?: string) =>
   ({ answer, durationMs: 1000, isAborted: false, turnId, reason: 'answer', usage: USAGE, ...(agentId ? { agentId } : {}) }) as never
 
 const NOW = Date.UTC(2026, 9, 6, 15, 30)
+const BAND = { hasSurvey: false, isWorking: true, maxRows: 3, bodyColumns: 120 } as unknown as RenderPropsOf['AbovePrompt']
+// What the engine was asked: pane titles, and the text put on the clipboard
+let titles: string[] = []
+let copied = ''
 
 // The plugin's store, kept where a test can look at it
 const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>(), usd = 0.5) => {
+  titles = []
+  copied = ''
   mock.clock(on, { now: NOW })
   on('store.get', (_$, e) => ({ value: store.get(e.key) }) as never)
   on('store.set', (_$, e) => (store.set(e.key, e.value), { value: undefined }) as never)
@@ -22,7 +28,12 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }) as never)
-  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.open', (_$, e) => (titles.push(String(e.title)), { value: { isPlaced: true } }) as never)
+  on('ui.copy', (_$, e) => ((copied = e.text), { value: { isCopied: true } }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.invalidate', () => ({ value: undefined }) as never)
+  // What the engine draws above the prompt when the board has nothing to say there
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('classic.PermissionRequest', () => ({}))
   on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd } } }) as never)
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
@@ -90,10 +101,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', props: PANE, requestId: 'session-board' })
     expect(await ui.find({ text: /✓ Fixed the login bug so users can sign in again/ })).toBeDefined()
-    expect(await ui.find({ text: /1 file edit · 1 command run/ })).toBeDefined()
+    expect(await ui.find({ text: /1 file edit · 1 command$/ })).toBeDefined()
     expect(await ui.find({ text: /Wake at .*check the CI run/ })).toBeDefined()
     // Tool calls that no dialog was shown for (auto mode) never reach "Needs you"
-    expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+    expect(await ui.find({ text: /NEEDS YOU/ })).toBeUndefined()
   })
 }
 
@@ -102,13 +113,16 @@ test('only a dialog really shown counts, and it clears once answered', async ($,
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
 
   await $.classic.Notification({ message: 'Claude is waiting for your input', notification_type: 'idle_prompt' })
-  expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+  expect(await ui.find({ text: /NEEDS YOU/ })).toBeUndefined()
 
   await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'git push', description: 'Push to GitHub' } } as never)
-  expect(await ui.find({ text: /⚑ Approve Bash: Push to GitHub/ })).toBeDefined()
+  expect(await ui.find({ text: /⚑ NEEDS YOU/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^  Approve Bash: Push to GitHub$/ })).toBeDefined()
+  expect(titles).toContain('Session · ⚑ 1')
 
   await $.tool.call({ tool: 'Bash', command: 'git push', description: 'Push to GitHub' })
-  expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+  expect(await ui.find({ text: /NEEDS YOU/ })).toBeUndefined()
+  expect(titles[titles.length - 1]).toBe('Session')
 })
 
 test('the log is saved, restored after a restart, and reset by /clear', async ($, on) => {
@@ -122,7 +136,7 @@ test('the log is saved, restored after a restart, and reset by /clear', async ($
   await settle()
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
   expect(await ui.find({ text: /✓ Shipped the login fix/ })).toBeDefined()
-  expect(await ui.find({ text: /3 file edits · 2 commands run/ })).toBeDefined()
+  expect(await ui.find({ text: /3 file edits · 2 commands$/ })).toBeDefined()
   expect(stored.has('board:old-session')).toBe(false)
 
   await $.turn.complete(ended('Added it.'))
@@ -131,7 +145,7 @@ test('the log is saved, restored after a restart, and reset by /clear', async ($
   expect(saved.done.map(d => d.text)).toEqual(['Shipped the login fix', 'Added a dark mode toggle'])
 
   await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: {} } as never)
-  expect(await ui.find({ text: /Done this session \(0\)/ })).toBeDefined()
+  expect(await ui.find({ text: /Done  ·/ })).toBeUndefined()
 })
 
 test('a question-only turn logs nothing but surfaces the ask', async ($, on) => {
@@ -141,15 +155,15 @@ test('a question-only turn logs nothing but surfaces the ask', async ($, on) => 
   await $.turn.complete(ended('Two ways. Want me to set up option 1?'))
   await settle()
 
-  expect(await ui.find({ text: /Done this session \(0\)/ })).toBeDefined()
-  expect(await ui.find({ text: /⚑ Decide: install mod as a plugin\?/ })).toBeDefined()
+  expect(await ui.find({ text: /Done  ·/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^  Decide: install mod as a plugin\?$/ })).toBeDefined()
 })
 
 test('shows the session cost and plan limits as they move', async ($, on) => {
   world(on, () => ({ done: [], ask: null }))
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
-  expect(await ui.find({ text: /\$0\.50 this session$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\$0\.50$/ })).toBeDefined()
 
   await $.session.measure({
     context: {},
@@ -157,9 +171,8 @@ test('shows the session cost and plan limits as they move', async ($, on) => {
     rateLimits: [{ kind: 'five_hour', percentUsed: 85 }, { kind: 'seven_day', percentUsed: 12.5 }],
     changed: ['cost', 'rateLimits'],
   } as never)
-  expect(await ui.find({ text: /\$3\.40 this session \(API-equivalent\)/ })).toBeDefined()
-  expect(await ui.find({ text: /5-hour limit: 85% used/ })).toBeDefined()
-  expect(await ui.find({ text: /Weekly limit: 13% used/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\$3\.40 API-equiv\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h ▓▓▓▓▓▓▓░ 85%$/ })).toBeDefined()
 })
 
 test('a subagent finishing logs nothing; an ask overtaken by a newer turn is dropped', async ($, on) => {
@@ -176,7 +189,7 @@ test('a subagent finishing logs nothing; an ask overtaken by a newer turn is dro
   await $.turn.start({ text: '', turnId: 't2' })
   await settle()
   expect(await ui.find({ text: /✓ Shipped it/ })).toBeDefined()
-  expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+  expect(await ui.find({ text: /NEEDS YOU/ })).toBeUndefined()
 })
 
 test('finds issues people name, and ignores look-alikes', () => {
@@ -204,21 +217,20 @@ test('shows the issue being worked on, links its PR, and keeps it when Claude re
 
   await $.prompt.submit({ text: "Let's work issue #57 through to a PR" } as never)
   await settle()
-  expect(await ui.find({ text: /Working on #57 · open/ })).toBeDefined()
-  expect(await ui.find({ text: /Login fails after password reset/ })).toBeDefined()
-  expect(await ui.find({ text: /done when they can sign in/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+    expect(await ui.find({ text: /done when they can sign in/ })).toBeDefined()
 
   await $.tool.call({ tool: 'Bash', command: 'gh issue view 99', description: 'Read a related issue' })
   await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill', description: 'Open the pull request' })
   await settle()
-  expect(await ui.find({ text: /Working on #57/ })).toBeDefined()
-  expect(await ui.find({ text: /PR #60 opened/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+  expect(await ui.find({ text: /PR #60 ↗/ })).toBeDefined()
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn).toContain('"href":"https://github.com/acme/app/pull/60"')
   expect(drawn).toContain('"href":"https://github.com/acme/app/issues/57"')
 
   await $.command.run({ command: 'issue', args: 'clear' } as never)
-  expect(await ui.find({ text: /Working on/ })).toBeUndefined()
+  expect(await ui.find({ text: /#57/ })).toBeUndefined()
 })
 
 test('shows live progress while a turn runs, and clears it when the turn ends', async ($, on) => {
@@ -226,7 +238,7 @@ test('shows live progress while a turn runs, and clears it when the turn ends', 
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
 
   await $.turn.start({ text: 'fix the flaky checkout test', turnId: 't1' })
-  expect(await ui.find({ text: /In progress · 0s/ })).toBeDefined()
+  expect(await ui.find({ text: /● Working · 0s/ })).toBeDefined()
   expect(await ui.find({ text: /“fix the flaky checkout test”/ })).toBeDefined()
   expect(await ui.find({ text: /▸ Thinking/ })).toBeDefined()
 
@@ -235,11 +247,10 @@ test('shows live progress while a turn runs, and clears it when the turn ends', 
   await $.tool.call({ tool: 'Bash', command: 'npm test -- checkout', description: 'Run the checkout tests' })
   expect(await ui.find({ text: /✓ Run the checkout tests/ })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: /✓ Run the checkout tests/ })).length).toBe(1)
-  expect(await ui.find({ text: /2 commands so far · 1 file edit this session/ })).toBeDefined()
 
   await $.turn.complete(ended('Fixed it.'))
   await settle()
-  expect(await ui.find({ text: /In progress/ })).toBeUndefined()
+  expect(await ui.find({ text: /● Working/ })).toBeUndefined()
   expect(await ui.find({ text: /✓ Fixed the flaky checkout test/ })).toBeDefined()
 })
 
@@ -247,12 +258,11 @@ test('says the cost is not reported, with tokens, where the setup prices nothing
   world(on, () => ({ done: [], ask: null }), new Map(), 0)
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
-  expect(await ui.find({ text: /\$0\.00 this session/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\$0\.00$/ })).toBeDefined()
 
   await $.turn.complete(ended('Done.'))
   await settle()
-  expect(await ui.find({ text: /Not reported in this setup/ })).toBeDefined()
-  expect(await ui.find({ text: /50k tokens used/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^cost not reported · 50k tok$/ })).toBeDefined()
 })
 
 test('counts files changed with git, however Claude changed them', async ($, on) => {
@@ -266,7 +276,7 @@ test('counts files changed with git, however Claude changed them', async ($, on)
   await $.turn.complete(ended('Fixed.'))
   await settle()
 
-  expect(await ui.find({ text: /3 files changed · 1 command run/ })).toBeDefined()
+  expect(await ui.find({ text: /3 files changed · 1 command$/ })).toBeDefined()
 })
 
 test('knows which issue a read is for, from the call itself', () => {
@@ -298,5 +308,47 @@ test('summarizes an issue once, however often Claude re-reads it', async ($, on)
   await $.tool.call({ tool: 'Bash', command: 'gh issue view 99', description: 'Read a related issue' })
   await settle()
   expect(issueCalls).toBe(1)
-  expect(await ui.find({ text: /Working on #57/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^#57 Login fails after password reset$/ })).toBeDefined()
+})
+
+test('keeps Done short, expands on request, and copies the session as a write-up', async ($, on) => {
+  let turn = 0
+  world(on, prompt =>
+    prompt.includes('issue tracker')
+      ? { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500.', state: 'open' }
+      : { done: [`Result ${++turn}`], ask: null },
+  )
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  await $.prompt.submit({ text: 'take issue #57' } as never)
+  for (const id of ['t1', 't2', 't3', 't4', 't5']) {
+    await $.turn.start({ text: 'go', turnId: id })
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the tests' })
+    await $.turn.complete(ended('ok', id))
+    await settle()
+  }
+
+  expect(await ui.find({ text: /Result 5/ })).toBeDefined()
+  expect(await ui.find({ text: /Result 2/ })).toBeUndefined()
+  await $.ui.press({ plugin: 'session-board', key: 'more' })
+  expect(await ui.find({ text: /Result 1/ })).toBeDefined()
+  await $.ui.press({ plugin: 'session-board', key: 'less' })
+  expect(await ui.find({ text: /Result 1/ })).toBeUndefined()
+
+  await $.ui.press({ plugin: 'session-board', key: 'copy' })
+  expect(copied).toContain('#57 Login fails after password reset (https://github.com/acme/app/issues/57)')
+  expect(copied).toContain('- Result 1')
+  expect(copied).toContain('- Result 5')
+})
+
+test('shows a one-line band above the prompt while working and the pane is out of sight', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  const idle = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await idle.find({ text: /●/ })).toBeUndefined()
+
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  const band = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ text: /● Working · 0s/ })).toBeDefined()
+
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'git push', description: 'Push to GitHub' } } as never)
+  expect(await band.find({ text: /⚑ Approve Bash: Push to GitHub/ })).toBeDefined()
 })
