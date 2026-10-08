@@ -7,7 +7,7 @@
     {
       "name": "session-board",
       "source": "./session-board",
-      "description": "A sidebar showing what needs you, what's scheduled next, what got done, and what it cost"
+      "description": "A sidebar showing the issue you're on, what needs you, what's next, what got done, and what it cost"
     }
   ]
 }

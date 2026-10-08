@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, Done, Need, Upcoming } from '../types'
+import type { Activity, Done, Issue, Need, Upcoming } from '../types'
+import { findIssueRef, findPrUrl, githubIssueArgv, isIssueRead, issuePrompt, parseIssueReply } from './issue'
+import type { IssueRef } from './issue'
 
 const PANE = 'session-board'
 const done = atom({ plugin: 'session-board', key: 'done' } as const, [])
@@ -9,6 +11,7 @@ const activity = atom({ plugin: 'session-board', key: 'activity' } as const, { e
 const upcoming = atom({ plugin: 'session-board', key: 'upcoming' } as const, [])
 const needs = atom({ plugin: 'session-board', key: 'needs' } as const, [])
 const spend = atom({ plugin: 'session-board', key: 'spend' } as const, { limits: [] })
+const issue = atom({ plugin: 'session-board', key: 'issue' } as const, null as Issue | null)
 
 // The last two parts of a path, enough to say which file without the person's folders
 const shortPath = (path: unknown) => String(path ?? '').split('/').slice(-2).join('/') || 'a file'
@@ -26,10 +29,15 @@ const clockTime = (ms: number) => {
 // The log outlives the process: saved per session in the store, restored when the session comes back
 const STORE_PREFIX = 'board:'
 const KEEP_DAYS = 30
-type Saved = { done: Done[]; activity: Activity; savedAt: number }
+type Saved = { done: Done[]; activity: Activity; issue?: Issue | null; savedAt: number }
 
 const save = async ($: EngineInterface) => {
-  const saved: Saved = { done: await read($, done), activity: await read($, activity), savedAt: await $.clock.now() }
+  const saved: Saved = {
+    done: await read($, done),
+    activity: await read($, activity),
+    issue: await read($, issue),
+    savedAt: await $.clock.now(),
+  }
   await $.store.set(STORE_PREFIX + (await $.session.id()), saved)
 }
 
@@ -38,6 +46,9 @@ const restore = async ($: EngineInterface) => {
   if (saved && (await read($, done)).length === 0) {
     await update($, done, () => saved.done)
     await update($, activity, () => saved.activity)
+  }
+  if (saved?.issue && !(await read($, issue))) {
+    await update($, issue, () => saved.issue ?? null)
   }
 }
 
@@ -49,6 +60,63 @@ const prune = async ($: EngineInterface) => {
     const saved = (await $.store.get(key)) as Saved | undefined
     if (!saved || saved.savedAt < cutoff) await $.store.delete(key)
   }
+}
+
+// Reads a GitHub issue with the person's own gh; null where gh is missing, logged out, or it is not GitHub
+const fetchGithubIssue = async ($: EngineInterface, ref: IssueRef): Promise<string | null> => {
+  const repo = await $.session.repo()
+  if (!ref.number || (!ref.repo && !repo?.remote?.includes('github.com'))) {
+    return null
+  }
+  try {
+    const run = await $.process.run(githubIssueArgv(ref), { cwd: repo?.root, timeoutMs: 15000 })
+    return run.exitCode === 0 ? run.stdout : null
+  } catch {
+    return null
+  }
+}
+
+// Turns an issue's raw text into the few words the board shows
+const summarizeIssue = async ($: EngineInterface, text: string, ref: IssueRef | null) => {
+  const reply = await $.model.complete({
+    model: 'claude-haiku-4-5-20251001',
+    prompt: issuePrompt(ref?.key ?? '', text),
+    maxTokens: 200,
+    timeoutMs: 20000,
+  })
+  return reply.isAnswered ? parseIssueReply(reply.text, ref) : null
+}
+
+// Shows an issue by key at once, then fills in its summary from the tracker when gh can reach it
+const followIssue = async ($: EngineInterface, ref: IssueRef) => {
+  const current = await read($, issue)
+  if (current?.key === ref.key && !current.isPending) {
+    return
+  }
+  await update($, issue, () => ({ key: ref.key, url: ref.url, title: '', summary: '', isPinned: true, isPending: true }))
+  const text = await fetchGithubIssue($, ref)
+  if (text) {
+    await learnIssue($, text, ref, true)
+  }
+  await save($)
+}
+
+// Summarizes an issue's text onto the board, keeping a PR already linked to the same issue
+const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null, isPinned: boolean) => {
+  const summary = await summarizeIssue($, text, ref)
+  if (!summary) {
+    return
+  }
+  const at = await $.clock.now()
+  await update($, issue, current => {
+    // A pinned issue stays until the person names another; Claude reading a different one leaves it
+    if (current?.isPinned && !isPinned && current.key !== summary.key) {
+      return current
+    }
+    const pr = current?.key === summary.key ? current.pr : undefined
+    return { ...summary, url: summary.url ?? (current?.key === summary.key ? current.url : undefined), pr, isPinned: isPinned || current?.isPinned, at }
+  })
+  await save($)
 }
 
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
@@ -136,6 +204,11 @@ export const register: Register = on => {
       name: 'board',
       description: 'Show the session board: what got done, what is next, and what needs you',
     })
+    await $.command.register({
+      name: 'issue',
+      description: 'Set the issue the board shows: a number, key or link, pasted issue text, or "clear"',
+      argumentHint: '<#123 | ENG-42 | link | text | clear>',
+    })
     await restore($)
     const usage = await $.session.usage()
     await update($, spend, () => ({ usd: usage.cost?.usd, limits: usage.rateLimits }))
@@ -159,6 +232,7 @@ export const register: Register = on => {
       await update($, activity, () => ({ edits: 0, commands: 0 }))
       await update($, needs, () => [])
       await update($, upcoming, () => [])
+      await update($, issue, () => null)
       await showNeedCount($)
     }
 
@@ -185,8 +259,32 @@ export const register: Register = on => {
     return { text: 'Session board opened.' }
   })
 
-  // The person acted, so the "your move" items are settled
+  on('command.run', { command: 'issue' }, async ($, e) => {
+    const arg = e.args.trim()
+    if (arg === 'clear') {
+      await update($, issue, () => null)
+      await save($)
+      return { text: 'Issue cleared from the board.' }
+    }
+    if (!arg) {
+      const current = await read($, issue)
+      return { text: current ? `Board shows ${current.key}: ${current.title || '(details pending)'}` : 'No issue on the board. Try /issue #123.' }
+    }
+    const ref = findIssueRef(arg.length < 200 ? `issue ${arg}` : arg)
+    if (ref && arg.length < 200) {
+      void followIssue($, ref).catch(() => undefined)
+      return { text: `Board now follows ${ref.key}.` }
+    }
+    void learnIssue($, arg, ref, true).catch(() => undefined)
+    return { text: 'Summarizing that issue onto the board.' }
+  })
+
+  // The person acted, so the "your move" items are settled; a prompt naming an issue puts it on the board
   on('prompt.submit', async ($, e, next) => {
+    const ref = findIssueRef(e.text)
+    if (ref) {
+      void followIssue($, ref).catch(() => undefined)
+    }
     await dropNeeds($, n => n.id === 'turn' || n.id === 'notify')
 
     return next(e)
@@ -217,6 +315,18 @@ export const register: Register = on => {
       const ran = await next(e)
       if (ran.deny !== undefined || ran.isError) {
         return ran
+      }
+
+      const input = e as unknown as Record<string, unknown>
+      if (ran.text && isIssueRead(e.tool, input)) {
+        void learnIssue($, ran.text, findIssueRef(`issue ${JSON.stringify(input)}`), false).catch(() => undefined)
+      }
+      const opensPr =
+        (e.tool === 'Bash' && /\bgh\s+pr\s+create\b/.test(e.command)) || /create_?pull_?request/i.test(e.tool)
+      const pr = opensPr && ran.text ? findPrUrl(ran.text) : null
+      if (pr) {
+        await update($, issue, current => (current ? { ...current, pr } : current))
+        await save($)
       }
 
       if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') {
@@ -330,11 +440,28 @@ export const register: Register = on => {
     const next = await read($, upcoming)
     const waiting = await read($, needs)
     const cost = await read($, spend)
+    const working = await read($, issue)
     // Usage windows only come with a subscription, where the dollar figure is what the API would charge
     const isPlan = cost.limits.some(l => l.kind !== 'spend_limit')
 
     return (
       <Box flexDirection="column">
+        {working && (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold color="cyan">
+              {fit(`Working on ${working.key}${working.state ? ` · ${working.state}` : ''}`)}
+            </Text>
+            {working.isPending ? (
+              <Text dimColor wrap="wrap">  Details appear once Claude reads the issue.</Text>
+            ) : (
+              <>
+                <Text wrap="wrap">  {working.title}</Text>
+                {working.summary && <Text dimColor wrap="wrap">  {working.summary}</Text>}
+              </>
+            )}
+            {working.pr && <Text color="green">{fit(`  PR #${working.pr.number} opened`)}</Text>}
+          </Box>
+        )}
         <Text bold color={waiting.length ? 'yellow' : undefined}>
           Needs you ({waiting.length})
         </Text>

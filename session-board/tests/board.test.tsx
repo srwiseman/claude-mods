@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, RenderPropsOf } from 'claude-code'
 
+import { findIssueRef } from '../hooks/issue'
+
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
 const settle = () => new Promise(r => setTimeout(r, 50))
 const ended = (answer: string, turnId = 't1', agentId?: string) =>
@@ -23,6 +25,14 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('classic.PermissionRequest', () => ({}))
   on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd: 0.5 } } }) as never)
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
+  on('session.repo', () => ({ value: { root: '/repo', remote: 'https://github.com/acme/app.git', internal: false, name: null } }) as never)
+  on('process.run', (_$, e) =>
+    ({
+      value: e.argv.join(' ').startsWith('gh issue view 57')
+        ? { exitCode: 0, stdout: JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+        : { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false },
+    }) as never,
+  )
   on('ui.status', () => ({ value: undefined }) as never)
   on('classic.Notification', () => ({}))
   on('classic.Stop', () => ({}))
@@ -33,6 +43,12 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
     ({ value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } }) as never,
   )
   on('tool.call', (_$, e) => {
+    if (e.tool === 'Bash' && e.command.startsWith('gh issue view 99')) {
+      return { result: {}, text: 'title: Unrelated dark mode request\nnumber: 99' } as never
+    }
+    if (e.tool === 'Bash' && e.command.startsWith('gh pr create')) {
+      return { result: {}, text: 'https://github.com/acme/app/pull/60' } as never
+    }
     if (e.tool === 'ScheduleWakeup') {
       return { result: { scheduledFor: Date.UTC(2026, 9, 6, 16, 0), clampedDelaySeconds: 1800, wasClamped: false } }
     }
@@ -150,4 +166,43 @@ test('a subagent finishing logs nothing; an ask overtaken by a newer turn is dro
   await settle()
   expect(await ui.find({ text: /✓ Shipped it/ })).toBeDefined()
   expect(await ui.find({ text: /Needs you \(0\)/ })).toBeDefined()
+})
+
+test('finds issues people name, and ignores look-alikes', () => {
+  expect(findIssueRef('can you take issue 57?')?.key).toBe('#57')
+  expect(findIssueRef('work through #12 to a PR')?.key).toBe('#12')
+  expect(findIssueRef('see https://github.com/acme/app/issues/88')).toEqual({
+    key: '#88', url: 'https://github.com/acme/app/issues/88', repo: 'acme/app', number: 88,
+  })
+  expect(findIssueRef('pick up the ENG-42 ticket')?.key).toBe('ENG-42')
+  expect(findIssueRef('https://acme.atlassian.net/browse/PAY-7')?.key).toBe('PAY-7')
+  expect(findIssueRef('fix the UTF-8 bug in the parser')).toBeNull()
+  expect(findIssueRef('bump to version 2.0 and ENG-42 later')).toBeNull()
+  expect(findIssueRef('make the font size 12')).toBeNull()
+})
+
+test('shows the issue being worked on, links its PR, and keeps it when Claude reads another', async ($, on) => {
+  world(on, prompt =>
+    prompt.includes('issue tracker')
+      ? prompt.includes('Login fails')
+        ? { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500 after a reset; done when they can sign in.', state: 'open' }
+        : { key: '#99', title: 'Unrelated dark mode request', summary: 'Add dark mode.', state: 'open' }
+      : { done: [], ask: null },
+  )
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.prompt.submit({ text: "Let's work issue #57 through to a PR" } as never)
+  await settle()
+  expect(await ui.find({ text: /Working on #57 · open/ })).toBeDefined()
+  expect(await ui.find({ text: /Login fails after password reset/ })).toBeDefined()
+  expect(await ui.find({ text: /done when they can sign in/ })).toBeDefined()
+
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 99', description: 'Read a related issue' })
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill', description: 'Open the pull request' })
+  await settle()
+  expect(await ui.find({ text: /Working on #57/ })).toBeDefined()
+  expect(await ui.find({ text: /PR #60 opened/ })).toBeDefined()
+
+  await $.command.run({ command: 'issue', args: 'clear' } as never)
+  expect(await ui.find({ text: /Working on/ })).toBeUndefined()
 })
