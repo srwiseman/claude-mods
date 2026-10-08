@@ -1,38 +1,35 @@
 # claude-mods
 
-Claude Code mods by srwiseman.
+[Claude Code mods](https://code.claude.com/docs/en/plugins/mods/overview) by srwiseman. A mod adds panes, commands and behavior inside Claude Code; this repo is a plugin marketplace you add once, then install the mods you want.
 
-## session-board
+| Mod | What it does |
+| --- | --- |
+| [session-board](session-board/) | A sidebar showing the issue you're on, live progress, what needs you, what got done, and what it cost |
 
-A **Session** pane beside the transcript with live sections:
+## Get started
 
-- **Working on**: the issue the session is on, as a title and one-line summary, with its pull request once one is opened. It picks the issue up when you name one in a prompt (an issue link, `#123`, `issue 123`, or a key like `ENG-42` next to the word issue/ticket/story/bug/task), when Claude reads one (`gh issue view`, a GitHub/Jira/Linear connector, or an issue link), or from `/issue <#123 | ENG-42 | link | pasted text | clear>`. GitHub issues are fetched with your own `gh`; other trackers fill in once Claude reads the issue.
+Needs Claude Code v2.1.287 or later (`claude --version`; `claude update` to upgrade).
 
-- **In progress**: while Claude works, how long the turn has run, what it is doing now, the last few steps it finished (from the short descriptions Claude gives its commands), and command counts. Free: no model calls.
-- **Needs you**: permission dialogs actually shown to you (nothing in auto mode unless it asks), questions and plans waiting on you, and a few-word summary of what Claude's last message asks you to do. The count also shows in the status line.
-- **Up next**: scheduled wakeups, recurring jobs, and running background tasks.
-- **Cost**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), tokens used, and your plan's 5-hour and weekly limits. Where a setup reports no cost to mods, it says so instead of showing $0.00.
-- **Done this session**: files changed this session (counted with git from the commit the session started on, so edits made through shell commands count too), and plain-English results of each turn ("Published the mod to GitHub so it installs on any machine"), not a list of commands.
-
-Opens by itself in terminals 144+ columns wide; otherwise type `/board`.
-
-### Install
-
-Needs Claude Code v2.1.287 or later (`claude --version`; `claude update` to upgrade). In your shell:
+Add this marketplace once:
 
 ```
 claude plugin marketplace add srwiseman/claude-mods
-claude plugin install session-board@srwiseman
 ```
 
-Or inside a Claude Code session: `/plugin marketplace add srwiseman/claude-mods`, then `/plugin install session-board@srwiseman`.
+Then install any mod by name:
 
-Start a new session, or run `/reload-plugins` in one that's open. The board opens on the right in terminals 144+ columns wide; otherwise type `/board`. Run `/plugin` to confirm it loaded (`1 mod active · session-board`).
+```
+claude plugin install <mod>@srwiseman
+```
 
-Optional: with the GitHub CLI installed and logged in (`gh auth login`), GitHub issues get their summary right away instead of once Claude reads them.
+Start a new session, or run `/reload-plugins` in an open one. Each mod's README has its details.
 
-Update later with `claude plugin marketplace update srwiseman` and `claude plugin update session-board@srwiseman`.
+To update later: `claude plugin marketplace update srwiseman`, then `claude plugin update <mod>@srwiseman`.
 
-### What it can see
+## Before you install
 
-Like any mod, it runs with your permissions. It reads every prompt and tool call in the session, and at the end of each turn sends your request, a list of the files changed and commands run (last two path segments only), and Claude's last message to Haiku, which writes the "Done" and "Needs you" lines. The Done log is saved on your machine in Claude Code's plugin store, one entry per session, so it survives restarts and resumes; entries untouched for 30 days are deleted. When it follows an issue, it sends the issue's text (up to 6,000 characters) to Haiku for the summary, and for GitHub issues it runs `gh issue view` as you. That is one small model call per turn on your plan or API key.
+A mod is code that runs inside Claude Code with your permissions, unsandboxed. Each mod's README has a "What it can see and do" section, and `claude plugin validate <folder>` lists every event a mod handles and every call it makes, without running it.
+
+## License
+
+[MIT](LICENSE)

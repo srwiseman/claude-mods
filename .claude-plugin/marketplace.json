@@ -1,7 +1,9 @@
 {
   "name": "srwiseman",
+  "description": "Claude Code mods by srwiseman: panes and behavior that run inside Claude Code",
   "owner": {
-    "name": "srwiseman"
+    "name": "srwiseman",
+    "url": "https://github.com/srwiseman"
   },
   "plugins": [
     {

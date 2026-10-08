@@ -1,6 +1,12 @@
 {
   "name": "session-board",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "A sidebar showing the issue you're on, what needs you, what's next, what got done, and what it cost",
+  "author": {
+    "name": "srwiseman",
+    "url": "https://github.com/srwiseman"
+  },
+  "homepage": "https://github.com/srwiseman/claude-mods/tree/main/session-board",
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }
