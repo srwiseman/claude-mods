@@ -17,12 +17,20 @@ Opens by itself in terminals 144+ columns wide; otherwise type `/board`.
 
 ### Install
 
+Needs Claude Code v2.1.287 or later (`claude --version`; `claude update` to upgrade). In your shell:
+
 ```
 claude plugin marketplace add srwiseman/claude-mods
 claude plugin install session-board@srwiseman
 ```
 
-Run `/reload-plugins` in sessions that are already open.
+Or inside a Claude Code session: `/plugin marketplace add srwiseman/claude-mods`, then `/plugin install session-board@srwiseman`.
+
+Start a new session, or run `/reload-plugins` in one that's open. The board opens on the right in terminals 144+ columns wide; otherwise type `/board`. Run `/plugin` to confirm it loaded (`1 mod active · session-board`).
+
+Optional: with the GitHub CLI installed and logged in (`gh auth login`), GitHub issues get their summary right away instead of once Claude reads them.
+
+Update later with `claude plugin marketplace update srwiseman` and `claude plugin update session-board@srwiseman`.
 
 ### What it can see
 
