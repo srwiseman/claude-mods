@@ -233,18 +233,52 @@ const markBase = async ($: EngineInterface) => {
   }
 }
 
-// Files that differ from the starting commit, committed or not, plus new files: edits made any way count
+const lines = (text: string | null) => (text ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+
+// The files this work changes, as a PR would show them: on a feature branch, the branch against where it
+// left the default branch; on the default branch, the person's own commits since the session began (never
+// what a pull brought in); plus uncommitted edits, and new files created during the session
 const countFilesChanged = async ($: EngineInterface) => {
   const base = (await read($, activity)).baseSha
   if (!base) {
     return
   }
-  const changed = await git($, ['diff', '--name-only', base])
-  const added = await git($, ['ls-files', '--others', '--exclude-standard'])
-  if (changed === null || added === null) {
-    return
+  const branch = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD']))?.trim()
+  const upstream = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']))?.trim()
+  const isFeatureBranch = !!branch && branch !== 'HEAD' && !!upstream && `origin/${branch}` !== upstream
+
+  let tracked: string[] | null = null
+  if (isFeatureBranch && upstream) {
+    const forkPoint = (await git($, ['merge-base', 'HEAD', upstream]))?.trim()
+    const branchDiff = forkPoint ? await git($, ['diff', '--name-only', forkPoint]) : null
+    tracked = branchDiff === null ? null : lines(branchDiff)
   }
-  const files = new Set([...changed.split('\n'), ...added.split('\n')].filter(Boolean))
+  if (tracked === null) {
+    const me = (await git($, ['config', 'user.email']))?.trim()
+    const mine = me
+      ? await git($, ['log', `--author=${me}`, '--format=', '--name-only', `${base}..HEAD`])
+      : await git($, ['diff', '--name-only', base, 'HEAD'])
+    const uncommitted = await git($, ['diff', '--name-only', 'HEAD'])
+    if (mine === null || uncommitted === null) {
+      return
+    }
+    tracked = [...lines(mine), ...lines(uncommitted)]
+  }
+
+  // New files count only when made during the session: older untracked output is not this work
+  const startedAt = (await $.session.usage()).startedAt
+  const cwd = await $.session.cwd()
+  const added: string[] = []
+  const untracked = lines(await git($, ['ls-files', '--others', '--exclude-standard']))
+  // Thousands of untracked files are generated output, not this work: skip them rather than check each
+  for (const path of untracked.length > 2000 ? [] : untracked) {
+    try {
+      if ((await $.fs.stat(`${cwd}/${path}`)).mtimeMs >= startedAt) added.push(path)
+    } catch {
+      // Gone already: not counted
+    }
+  }
+  const files = new Set([...tracked, ...added])
   await update($, activity, a => ({ ...a, filesChanged: files.size }))
 }
 
@@ -735,7 +769,8 @@ export const register: Register = on => {
     const hasCost = b.cost.usd !== undefined || b.cost.isUnpriced || limit !== undefined
     const isEmpty = !b.working && !b.now && !b.waiting.length && !b.log.length && !b.next.length
     const w = b.working
-    const tokens = (b.cost.tokens ?? 0) > 0 ? ` · ${tokenCount(b.cost.tokens ?? 0)} tok` : ''
+    // Tokens processed are mostly cached context re-read each step: shown only where no cost is reported
+    const tokens = (b.cost.tokens ?? 0) > 0 ? ` · ${tokenCount(b.cost.tokens ?? 0)} tokens processed` : ''
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -867,8 +902,8 @@ export const register: Register = on => {
                     {b.cost.isUnpriced
                       ? `cost not reported${tokens}`
                       : b.cost.usd !== undefined
-                        ? `${money(b.cost.usd)}${isPlan ? ' API-equiv.' : ''}${tokens}`
-                        : `no cost yet${tokens}`}
+                        ? `${money(b.cost.usd)}${isPlan ? ' API-equiv.' : ''}`
+                        : 'no cost yet'}
                   </Text>
                   {limit && (
                     <Text color={limit.percentUsed >= 80 ? 'yellow' : undefined} dimColor={limit.percentUsed < 80}>

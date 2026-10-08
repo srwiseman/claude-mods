@@ -14,11 +14,26 @@ const BAND = { hasSurvey: false, isWorking: true, maxRows: 3, bodyColumns: 120 }
 // What the engine was asked: pane titles, and the text put on the clipboard
 let titles: string[] = []
 let copied = ''
+// What git answers in the test repository, by command line; a test may change any of them
+let gitAnswers: Record<string, string> = {}
+// When each untracked file was last written; unlisted files are new
+let mtimes: Record<string, number> = {}
 
 // The plugin's store, kept where a test can look at it
 const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>(), usd = 0.5) => {
   titles = []
   copied = ''
+  mtimes = {}
+  gitAnswers = {
+    'git rev-parse HEAD': 'abc123\n',
+    'git rev-parse --abbrev-ref HEAD': 'main\n',
+    'git symbolic-ref --short refs/remotes/origin/HEAD': 'origin/main\n',
+    'git config user.email': 'me@example.com\n',
+    'git log --author=me@example.com --format= --name-only abc123..HEAD': 'src/cart.ts\n',
+    'git diff --name-only HEAD': 'src/checkout.ts\n',
+    'git ls-files --others --exclude-standard': 'src/checkout.test.ts\nsrc/cart.ts\n',
+  }
+  on('fs.stat', (_$, e) => ({ value: { kind: 'file', size: 1, mtimeMs: mtimes[String(e.path).replace('/repo/', '')] ?? NOW + 1000, isLink: false } }) as never)
   mock.clock(on, { now: NOW })
   on('store.get', (_$, e) => ({ value: store.get(e.key) }) as never)
   on('store.set', (_$, e) => (store.set(e.key, e.value), { value: undefined }) as never)
@@ -39,19 +54,15 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
   on('session.repo', () => ({ value: { root: '/repo', remote: 'https://github.com/acme/app.git', internal: false, name: null } }) as never)
   on('session.cwd', () => ({ value: '/repo' }) as never)
-  on('process.run', (_$, e) =>
-    ({
-      value: e.argv.join(' ') === 'git rev-parse HEAD'
-        ? { exitCode: 0, stdout: 'abc123\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : e.argv.join(' ') === 'git diff --name-only abc123'
-        ? { exitCode: 0, stdout: 'src/cart.ts\nsrc/checkout.ts\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : e.argv.join(' ') === 'git ls-files --others --exclude-standard'
-        ? { exitCode: 0, stdout: 'src/checkout.test.ts\nsrc/cart.ts\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : e.argv.join(' ').startsWith('gh issue view 57')
-        ? { exitCode: 0, stdout: JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN', url: 'https://github.com/acme/app/issues/57' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false },
-    }) as never,
-  )
+  on('process.run', (_$, e) => {
+    const line = e.argv.join(' ')
+    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
+    if (line in gitAnswers) return ok(gitAnswers[line] ?? '')
+    if (line.startsWith('gh issue view 57')) {
+      return ok(JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN', url: 'https://github.com/acme/app/issues/57' }))
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
   on('ui.status', () => ({ value: undefined }) as never)
   on('classic.Notification', () => ({}))
   on('classic.Stop', () => ({}))
@@ -282,7 +293,7 @@ test('says the cost is not reported, with tokens, where the setup prices nothing
 
   await $.turn.complete(ended('Done.'))
   await settle()
-  expect(await ui.find({ type: 'Text', text: /^cost not reported · 50k tok$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^cost not reported · 50k tokens processed$/ })).toBeDefined()
 })
 
 test('counts files changed with git, however Claude changed them', async ($, on) => {
@@ -509,4 +520,44 @@ test('Up next lines end when their work does, without the Stop hook', async ($, 
   expect(await shows(/post the release notes/)).toBe(true)
   await $.prompt.submit({ text: 'post the release notes', origin: { kind: 'scheduled-trigger' } } as never)
   expect(await shows(/post the release notes/)).toBe(false)
+})
+
+test('counts the files a PR would show, not what a pull or old build output added', async ($, on) => {
+  world(on, () => ({ done: ['Fixed checkout totals'], ask: null }))
+  const pr = Array.from({ length: 30 }, (_, i) => `src/feature/file${i}.ts`)
+  const oldBuild = Array.from({ length: 400 }, (_, i) => `dist/chunk${i}.js`)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+
+  // Claude branched, pulled a newer main, and the repo holds old untracked build output
+  Object.assign(gitAnswers, {
+    'git rev-parse --abbrev-ref HEAD': 'fix-57\n',
+    'git merge-base HEAD origin/main': 'fork1\n',
+    'git diff --name-only fork1': pr.join('\n') + '\n',
+    'git diff --name-only abc123': Array.from({ length: 479 }, (_, i) => `x${i}`).join('\n'),
+    'git ls-files --others --exclude-standard': [...oldBuild, 'src/feature/new.test.ts'].join('\n') + '\n',
+  })
+  for (const path of oldBuild) mtimes[path] = NOW - 86_400_000
+
+  await $.turn.start({ text: 'fix checkout totals', turnId: 't1' })
+  await $.turn.complete(ended('Fixed.'))
+  await settle()
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ text: /31 files changed/ })).toBeDefined()
+
+  // Back on main after a pull: only the person's own commits count
+  Object.assign(gitAnswers, { 'git rev-parse --abbrev-ref HEAD': 'main\n', 'git ls-files --others --exclude-standard': '' })
+  await $.turn.start({ text: 'small fix', turnId: 't2' })
+  await $.turn.complete(ended('Done.', 't2'))
+  await settle()
+  expect(await ui.find({ text: /2 files changed/ })).toBeDefined()
+})
+
+test('shows tokens only where no cost is reported', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(ended('Done.'))
+  await settle()
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ type: 'Text', text: /^\$0\.50$/ })).toBeDefined()
+  expect(await ui.find({ text: /tokens/ })).toBeUndefined()
 })
