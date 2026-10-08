@@ -62,8 +62,8 @@ Update with `claude plugin marketplace update srwiseman` and `claude plugin upda
 Like any mod, it runs with your permissions.
 
 - It reads every prompt and tool call in the session.
-- At the end of each turn it sends your request, a list of the files changed and commands run (last two path segments only), and Claude's last message to Claude Haiku, which writes the "Done" and "Needs you" lines: one small model call per turn on your plan or API key.
-- When it follows an issue, it sends the issue's text (up to 6,000 characters) to Haiku for the summary, and for GitHub issues it runs `gh issue view` as you.
+- At the end of each turn it sends your request, a list of the files changed and commands run (last two path segments only), and Claude's last message to Claude Haiku 5.5 at low effort (Haiku 4.5 where 5.5 isn't offered yet), which writes the "Done" and "Needs you" lines: one small model call per turn on your plan or API key, a small fraction of a cent.
+- When it follows an issue, it sends the issue's text (up to 6,000 characters) to Haiku for the summary, once per issue, and for GitHub issues it runs `gh issue view` as you.
 - It runs read-only git commands in the session's folder (`rev-parse`, `symbolic-ref`, `merge-base`, `config user.email`, `log`, `diff --name-only`, `ls-files`) and reads file times to count files changed.
 - The Done log, files-changed count and issue are saved on your machine in Claude Code's plugin store, one entry per session, so they survive restarts and resumes. Entries untouched for 30 days are deleted.
 

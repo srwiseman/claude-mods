@@ -113,15 +113,33 @@ const fetchGithubIssue = async ($: EngineInterface, ref: IssueRef): Promise<stri
   }
 }
 
+// The board's own model calls: Claude Haiku 5.5 at low effort, the fastest and cheapest model for short
+// summaries; Haiku 4.5 where 5.5 is refused (not yet offered on the account or provider, or blocked)
+const MODEL = 'claude-haiku-5-5'
+const FALLBACK_MODEL = 'claude-haiku-4-5-20251001'
+let isModelRefused = false
+
+const ask = async ($: EngineInterface, prompt: string): Promise<string | null> => {
+  if (!isModelRefused) {
+    try {
+      // Thinking counts as output, so the room is generous; low effort keeps it brief
+      const reply = await $.model.complete({ model: MODEL, prompt, effort: 'low', maxTokens: 2000, timeoutMs: 20000 })
+      if (reply.isAnswered) return reply.text
+      // Only a refusal of the model itself moves to the fallback; a busy or failed call just skips this summary
+      if (reply.reason !== 'api-error' || ![400, 403, 404].includes(reply.status ?? 0)) return null
+    } catch {
+      // The engine would not send to this model at all
+    }
+    isModelRefused = true
+  }
+  const reply = await $.model.complete({ model: FALLBACK_MODEL, prompt, maxTokens: 300, timeoutMs: 20000 })
+  return reply.isAnswered ? reply.text : null
+}
+
 // Turns an issue's raw text into the few words the board shows
 const summarizeIssue = async ($: EngineInterface, text: string, ref: IssueRef | null) => {
-  const reply = await $.model.complete({
-    model: 'claude-haiku-4-5-20251001',
-    prompt: issuePrompt(ref?.key ?? '', text),
-    maxTokens: 200,
-    timeoutMs: 20000,
-  })
-  return reply.isAnswered ? parseIssueReply(reply.text, ref) : null
+  const reply = await ask($, issuePrompt(ref?.key ?? '', text))
+  return reply === null ? null : parseIssueReply(reply, ref)
 }
 
 // Shows an issue by key at once, then fills in its summary from the tracker when gh can reach it
@@ -406,15 +424,10 @@ const summarizeTurn = async (
   message: string,
 ): Promise<TurnSummary> => {
   const logged = (await read($, done)).slice(-15)
-  const reply = await $.model.complete({
-    model: 'claude-haiku-4-5-20251001',
-    prompt: TURN_PROMPT(request.slice(0, 1500), actions.slice(-40), message, logged),
-    maxTokens: 200,
-    timeoutMs: 20000,
-  })
-  if (reply.isAnswered) {
+  const reply = await ask($, TURN_PROMPT(request.slice(0, 1500), actions.slice(-40), message, logged))
+  if (reply !== null) {
     try {
-      const json = JSON.parse(reply.text.slice(reply.text.indexOf('{'), reply.text.lastIndexOf('}') + 1)) as Partial<TurnSummary>
+      const json = JSON.parse(reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1)) as Partial<TurnSummary>
       return {
         done: (Array.isArray(json.done) ? json.done : []).map(d => oneLine(d, 100)).filter(Boolean).slice(0, 2),
         ask: typeof json.ask === 'string' && json.ask.trim() ? oneLine(json.ask, 70) : null,

@@ -18,12 +18,17 @@ let copied = ''
 let gitAnswers: Record<string, string> = {}
 // When each untracked file was last written; unlisted files are new
 let mtimes: Record<string, number> = {}
+// Every model call the board made, and whether the account refuses Haiku 5.5
+let modelCalls: { model: string; effort?: string }[] = []
+let refuseNewest = false
 
 // The plugin's store, kept where a test can look at it
 const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>(), usd = 0.5) => {
   titles = []
   copied = ''
   mtimes = {}
+  modelCalls = []
+  refuseNewest = false
   gitAnswers = {
     'git rev-parse HEAD': 'abc123\n',
     'git rev-parse --abbrev-ref HEAD': 'main\n',
@@ -69,9 +74,13 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
-  on('model.complete', (_$, e) =>
-    ({ value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } }) as never,
-  )
+  on('model.complete', (_$, e) => {
+    modelCalls.push({ model: e.model, effort: e.effort })
+    if (refuseNewest && e.model === 'claude-haiku-5-5') {
+      return { value: { isAnswered: false, reason: 'api-error', status: 404, error: 'not_found_error', usage: {} } } as never
+    }
+    return { value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } } as never
+  })
   on('tool.call', (_$, e) => {
     if (e.tool === 'Bash' && e.command.startsWith('gh issue view 57')) {
       const out = 'title:\tLogin fails after password reset\nstate:\tOPEN\nnumber:\t57\n--\nUsers get a 500.'
@@ -560,4 +569,30 @@ test('shows tokens only where no cost is reported', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
   expect(await ui.find({ type: 'Text', text: /^\$0\.50$/ })).toBeDefined()
   expect(await ui.find({ text: /tokens/ })).toBeUndefined()
+})
+
+test('summarizes with Claude Haiku 5.5 at low effort', async ($, on) => {
+  world(on, prompt =>
+    prompt.includes('issue tracker') ? { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500.', state: 'open' } : { done: ['Fixed it'], ask: null },
+  )
+  await $.prompt.submit({ text: 'take issue #57' } as never)
+  await $.turn.complete(ended('Fixed.'))
+  await settle()
+  expect(modelCalls.length).toBe(2)
+  expect(modelCalls.every(c => c.model === 'claude-haiku-5-5' && c.effort === 'low')).toBe(true)
+})
+
+test('falls back to Haiku 4.5 once where 5.5 is refused, and stays there', async ($, on) => {
+  world(on, () => ({ done: ['Fixed it'], ask: null }))
+  refuseNewest = true
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.turn.complete(ended('Fixed.'))
+  await settle()
+  expect(modelCalls.map(c => c.model)).toEqual(['claude-haiku-5-5', 'claude-haiku-4-5-20251001'])
+  expect(await ui.find({ text: /✓ Fixed it/ })).toBeDefined()
+
+  await $.turn.complete(ended('Again.', 't2'))
+  await settle()
+  expect(modelCalls.map(c => c.model)).toEqual(['claude-haiku-5-5', 'claude-haiku-4-5-20251001', 'claude-haiku-4-5-20251001'])
 })
