@@ -19,7 +19,7 @@ Opens by itself in terminals 144+ columns wide; otherwise type `/board`.
 
 ```
 claude plugin marketplace add srwiseman/claude-mods
-claude plugin install session-board@my-mods
+claude plugin install session-board@srwiseman
 ```
 
 Run `/reload-plugins` in sessions that are already open.
