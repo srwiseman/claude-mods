@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, Done, Issue, Need, Upcoming } from '../types'
+import type { Activity, Done, Issue, Live, Need, Upcoming } from '../types'
 import { findIssueRef, findPrUrl, githubIssueArgv, isIssueRead, issuePrompt, parseIssueReply } from './issue'
 import type { IssueRef } from './issue'
 
@@ -12,6 +12,7 @@ const upcoming = atom({ plugin: 'session-board', key: 'upcoming' } as const, [])
 const needs = atom({ plugin: 'session-board', key: 'needs' } as const, [])
 const spend = atom({ plugin: 'session-board', key: 'spend' } as const, { limits: [] })
 const issue = atom({ plugin: 'session-board', key: 'issue' } as const, null as Issue | null)
+const live = atom({ plugin: 'session-board', key: 'live' } as const, null as Live | null)
 
 // The last two parts of a path, enough to say which file without the person's folders
 const shortPath = (path: unknown) => String(path ?? '').split('/').slice(-2).join('/') || 'a file'
@@ -21,6 +22,24 @@ const oneLine = (text: unknown, max = 60) => {
 }
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5-hour limit', seven_day: 'Weekly limit', spend_limit: 'Spend limit' }
 const money = (usd: number) => (usd < 10 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(0)}`)
+const elapsed = (ms: number) => {
+  const minutes = Math.floor(ms / 60000)
+  if (minutes < 1) return `${Math.max(0, Math.round(ms / 1000))}s`
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+// What a tool call is doing, in words a person follows; undefined for calls too small to mention
+const describeCall = (e: { tool: string } & Record<string, unknown>): string | undefined => {
+  const text = (value: unknown) => oneLine(value, 60)
+  if (e.tool === 'Bash') return text(e.description ?? e.command)
+  if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') return `Editing ${shortPath(e.file_path ?? e.notebook_path)}`
+  if (e.tool === 'Agent') return `Subagent: ${text(e.description ?? 'working on a part')}`
+  if (e.tool === 'WebFetch' || e.tool === 'WebSearch') return 'Researching on the web'
+  if (e.tool === 'Read' || e.tool === 'Grep' || e.tool === 'Glob') return 'Reading code'
+  if (e.tool.startsWith('mcp__')) return `Using ${e.tool.split('__')[1] ?? 'a connector'}`
+  return undefined
+}
+
 const clockTime = (ms: number) => {
   const d = new Date(ms)
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -119,6 +138,20 @@ const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null
   await save($)
 }
 
+// Reads the running cost straight from the engine, not only when it says the cost moved
+const refreshSpend = async ($: EngineInterface) => {
+  const usage = await $.session.usage()
+  await update($, spend, s => ({
+    ...s,
+    usd: usage.cost?.usd ?? s.usd,
+    limits: usage.rateLimits.length ? usage.rateLimits : s.limits,
+    // Tokens spent but nothing priced: this setup does not report a cost to mods
+    isUnpriced: (s.tokens ?? 0) > 0 && !usage.cost?.usd,
+  }))
+}
+
+const tokenCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
   const need: Need = { id, label, at: await $.clock.now() }
   await update($, needs, list => [...list.filter(n => n.id !== id), need])
@@ -195,6 +228,8 @@ const summarizeTurn = async (
 export const register: Register = on => {
   // The main loop's latest turn, so a summary that lands after a newer turn began is dropped
   let currentTurn = ''
+  // Moves the In progress clock while a turn runs
+  let ticker: { cancel: () => void } | undefined
   // This turn's request and what changed during it, read when the turn ends
   let request = ''
   let actions: string[] = []
@@ -210,8 +245,7 @@ export const register: Register = on => {
       argumentHint: '<#123 | ENG-42 | link | text | clear>',
     })
     await restore($)
-    const usage = await $.session.usage()
-    await update($, spend, () => ({ usd: usage.cost?.usd, limits: usage.rateLimits }))
+    await refreshSpend($)
     void prune($).catch(() => undefined)
     void $.ui.open({ id: PANE, title: 'Session' })
 
@@ -220,7 +254,12 @@ export const register: Register = on => {
 
   // The engine reports when the cost grows or a usage window moves
   on('session.measure', async ($, e, next) => {
-    await update($, spend, () => ({ usd: e.cost?.usd, limits: e.rateLimits }))
+    await update($, spend, s => ({
+      ...s,
+      usd: e.cost?.usd ?? s.usd,
+      limits: e.rateLimits.length ? e.rateLimits : s.limits,
+      isUnpriced: (s.tokens ?? 0) > 0 && !(e.cost?.usd ?? s.usd),
+    }))
 
     return next(e)
   })
@@ -233,6 +272,7 @@ export const register: Register = on => {
       await update($, needs, () => [])
       await update($, upcoming, () => [])
       await update($, issue, () => null)
+      await update($, live, () => null)
       await showNeedCount($)
     }
 
@@ -301,6 +341,12 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const id = e.tool_use_id ?? ''
+    const isMain = !e.agentId
+    const label = isMain ? describeCall(e as unknown as { tool: string } & Record<string, unknown>) : undefined
+    if (label) {
+      const at = await $.clock.now()
+      await update($, live, l => (l ? { ...l, now: at, current: { id, label } } : l))
+    }
 
     if (e.tool === 'AskUserQuestion') {
       const first = e.questions?.[0]?.question
@@ -328,6 +374,16 @@ export const register: Register = on => {
         await update($, issue, current => (current ? { ...current, pr } : current))
         await save($)
       }
+
+      // A finished step worth telling: a command that changed something, or a subagent's part
+      const isStep = label && ((e.tool === 'Bash' && !ran.isReadOnly) || e.tool === 'Agent')
+      await update($, live, l => {
+        if (!l) return l
+        const steps = isStep && l.steps[l.steps.length - 1] !== label ? [...l.steps, label].slice(-20) : l.steps
+        const isEdit = isMain && (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit')
+        const isCommand = isMain && e.tool === 'Bash' && !ran.isReadOnly
+        return { ...l, steps, edits: l.edits + (isEdit ? 1 : 0), commands: l.commands + (isCommand ? 1 : 0) }
+      })
 
       if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit') {
         const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
@@ -357,6 +413,9 @@ export const register: Register = on => {
 
       return ran
     } finally {
+      if (label) {
+        await update($, live, l => (l?.current?.id === id ? { ...l, current: undefined } : l))
+      }
       // The call went ahead or was refused: any dialog for it is answered
       await dropNeeds($, n => n.id === id || n.id === `perm:${e.tool}`)
     }
@@ -370,14 +429,35 @@ export const register: Register = on => {
     }
     await dropNeeds($, n => n.id === 'turn')
 
+    const now = await $.clock.now()
+    await update($, live, () => ({ startedAt: now, now, request: oneLine(e.text, 70), steps: [], edits: 0, commands: 0 }))
+    ticker?.cancel()
+    ticker = $.clock.every(15000, () => {
+      void $.clock.now().then(at => update($, live, l => (l ? { ...l, now: at } : l)))
+      void refreshSpend($).catch(() => undefined)
+    })
+
     return next(e)
   })
 
   // Every turn ends here in every kind of session, so the log is written from this
   on('turn.complete', async ($, e, next) => {
+    // Every turn's tokens count, a subagent's included
+    const used = e.usage
+    if (used) {
+      const tokens =
+        used.input_tokens + used.output_tokens + (used.cache_creation_input_tokens ?? 0) + (used.cache_read_input_tokens ?? 0)
+      await update($, spend, s => ({ ...s, tokens: (s.tokens ?? 0) + tokens }))
+    }
+    await refreshSpend($).catch(() => undefined)
+
     if (e.agentId) {
       return next(e)
     }
+
+    ticker?.cancel()
+    ticker = undefined
+    await update($, live, () => null)
 
     const turnActions = actions
     actions = []
@@ -441,6 +521,7 @@ export const register: Register = on => {
     const waiting = await read($, needs)
     const cost = await read($, spend)
     const working = await read($, issue)
+    const now = await read($, live)
     // Usage windows only come with a subscription, where the dollar figure is what the API would charge
     const isPlan = cost.limits.some(l => l.kind !== 'spend_limit')
 
@@ -460,6 +541,21 @@ export const register: Register = on => {
               </>
             )}
             {working.pr && <Text color="green">{fit(`  PR #${working.pr.number} opened`)}</Text>}
+          </Box>
+        )}
+        {now && (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold color="magenta">In progress · {elapsed(now.now - now.startedAt)}</Text>
+            {!working && now.request && <Text dimColor wrap="wrap">  “{now.request}”</Text>}
+            {now.steps.slice(-4).map(step => (
+              <Text dimColor>{fit(`  ✓ ${step}`)}</Text>
+            ))}
+            <Text>{fit(`  ▸ ${now.current?.label ?? 'Thinking'}`)}</Text>
+            {now.edits + now.commands > 0 && (
+              <Text dimColor>
+                {fit(`  ${now.edits} file edit${now.edits === 1 ? '' : 's'} · ${now.commands} command${now.commands === 1 ? '' : 's'} so far`)}
+              </Text>
+            )}
           </Box>
         )}
         <Text bold color={waiting.length ? 'yellow' : undefined}>
@@ -503,10 +599,14 @@ export const register: Register = on => {
 
         <Text> </Text>
         <Text bold>Cost</Text>
-        {cost.usd === undefined && <Text dimColor>  No figure yet.</Text>}
-        {cost.usd !== undefined && (
+        {cost.isUnpriced ? (
+          <Text dimColor>{fit('  Not reported in this setup')}</Text>
+        ) : cost.usd === undefined ? (
+          <Text dimColor>  No figure yet.</Text>
+        ) : (
           <Text>{fit(`  ${money(cost.usd)} this session${isPlan ? ' (API-equivalent)' : ''}`)}</Text>
         )}
+        {(cost.tokens ?? 0) > 0 && <Text dimColor>{fit(`  ${tokenCount(cost.tokens ?? 0)} tokens used`)}</Text>}
         {cost.limits.map(l => (
           <Text color={l.percentUsed >= 80 ? 'yellow' : undefined} dimColor={l.percentUsed < 80}>
             {fit(

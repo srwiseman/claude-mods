@@ -5,13 +5,14 @@ import { findIssueRef } from '../hooks/issue'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
 const settle = () => new Promise(r => setTimeout(r, 50))
+const USAGE = { input_tokens: 1200, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 48500, model: 'claude-opus-5-5' }
 const ended = (answer: string, turnId = 't1', agentId?: string) =>
-  ({ answer, durationMs: 1000, isAborted: false, turnId, reason: 'answer', ...(agentId ? { agentId } : {}) }) as never
+  ({ answer, durationMs: 1000, isAborted: false, turnId, reason: 'answer', usage: USAGE, ...(agentId ? { agentId } : {}) }) as never
 
 const NOW = Date.UTC(2026, 9, 6, 15, 30)
 
 // The plugin's store, kept where a test can look at it
-const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>()) => {
+const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>(), usd = 0.5) => {
   mock.clock(on, { now: NOW })
   on('store.get', (_$, e) => ({ value: store.get(e.key) }) as never)
   on('store.set', (_$, e) => (store.set(e.key, e.value), { value: undefined }) as never)
@@ -23,7 +24,7 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   on('command.register', () => ({ value: undefined }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('classic.PermissionRequest', () => ({}))
-  on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd: 0.5 } } }) as never)
+  on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd } } }) as never)
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
   on('session.repo', () => ({ value: { root: '/repo', remote: 'https://github.com/acme/app.git', internal: false, name: null } }) as never)
   on('process.run', (_$, e) =>
@@ -205,4 +206,38 @@ test('shows the issue being worked on, links its PR, and keeps it when Claude re
 
   await $.command.run({ command: 'issue', args: 'clear' } as never)
   expect(await ui.find({ text: /Working on/ })).toBeUndefined()
+})
+
+test('shows live progress while a turn runs, and clears it when the turn ends', async ($, on) => {
+  world(on, () => ({ done: ['Fixed the flaky checkout test'], ask: null }))
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.turn.start({ text: 'fix the flaky checkout test', turnId: 't1' })
+  expect(await ui.find({ text: /In progress · 0s/ })).toBeDefined()
+  expect(await ui.find({ text: /“fix the flaky checkout test”/ })).toBeDefined()
+  expect(await ui.find({ text: /▸ Thinking/ })).toBeDefined()
+
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/src/checkout.ts', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test -- checkout', description: 'Run the checkout tests' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test -- checkout', description: 'Run the checkout tests' })
+  expect(await ui.find({ text: /✓ Run the checkout tests/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: /✓ Run the checkout tests/ })).length).toBe(1)
+  expect(await ui.find({ text: /1 file edit · 2 commands so far/ })).toBeDefined()
+
+  await $.turn.complete(ended('Fixed it.'))
+  await settle()
+  expect(await ui.find({ text: /In progress/ })).toBeUndefined()
+  expect(await ui.find({ text: /✓ Fixed the flaky checkout test/ })).toBeDefined()
+})
+
+test('says the cost is not reported, with tokens, where the setup prices nothing', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }), new Map(), 0)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ text: /\$0\.00 this session/ })).toBeDefined()
+
+  await $.turn.complete(ended('Done.'))
+  await settle()
+  expect(await ui.find({ text: /Not reported in this setup/ })).toBeDefined()
+  expect(await ui.find({ text: /50k tokens used/ })).toBeDefined()
 })
