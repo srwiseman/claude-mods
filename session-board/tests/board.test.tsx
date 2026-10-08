@@ -37,7 +37,7 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
         : e.argv.join(' ') === 'git ls-files --others --exclude-standard'
         ? { exitCode: 0, stdout: 'src/checkout.test.ts\nsrc/cart.ts\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
         : e.argv.join(' ').startsWith('gh issue view 57')
-        ? { exitCode: 0, stdout: JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+        ? { exitCode: 0, stdout: JSON.stringify({ number: 57, title: 'Login fails after password reset', body: 'Users get a 500 after resetting their password. Expected: they can sign in.', state: 'OPEN', url: 'https://github.com/acme/app/issues/57' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
         : { exitCode: 1, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false },
     }) as never,
   )
@@ -210,6 +210,9 @@ test('shows the issue being worked on, links its PR, and keeps it when Claude re
   await settle()
   expect(await ui.find({ text: /Working on #57/ })).toBeDefined()
   expect(await ui.find({ text: /PR #60 opened/ })).toBeDefined()
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('"href":"https://github.com/acme/app/pull/60"')
+  expect(drawn).toContain('"href":"https://github.com/acme/app/issues/57"')
 
   await $.command.run({ command: 'issue', args: 'clear' } as never)
   expect(await ui.find({ text: /Working on/ })).toBeUndefined()

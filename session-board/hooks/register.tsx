@@ -115,7 +115,14 @@ const followIssue = async ($: EngineInterface, ref: IssueRef) => {
   await update($, issue, () => ({ key: ref.key, url: ref.url, title: '', summary: '', isPinned: true, isPending: true }))
   const text = await fetchGithubIssue($, ref)
   if (text) {
-    await learnIssue($, text, ref, true)
+    // gh's JSON carries the issue's address, so the board can link it
+    let url = ref.url
+    try {
+      url = (JSON.parse(text) as { url?: string }).url ?? url
+    } catch {
+      // Not JSON: keep what the reference said
+    }
+    await learnIssue($, text, { ...ref, url }, true)
   }
   await save($)
 }
@@ -556,7 +563,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     const width = Math.max(20, (e.props.bodyColumns ?? 40) - 2)
     const fit = (text: string) => (text.length > width ? text.slice(0, width - 1) + '…' : text)
 
@@ -575,7 +582,8 @@ export const register: Register = on => {
         {working && (
           <Box flexDirection="column" marginBottom={1}>
             <Text bold color="cyan">
-              {fit(`Working on ${working.key}${working.state ? ` · ${working.state}` : ''}`)}
+              Working on {working.url ? <Link href={working.url} label={working.key} /> : working.key}
+              {working.state ? ` · ${working.state}` : ''}
             </Text>
             {working.isPending ? (
               <Text dimColor wrap="wrap">  Details appear once Claude reads the issue.</Text>
@@ -585,7 +593,12 @@ export const register: Register = on => {
                 {working.summary && <Text dimColor wrap="wrap">  {working.summary}</Text>}
               </>
             )}
-            {working.pr && <Text color="green">{fit(`  PR #${working.pr.number} opened`)}</Text>}
+            {working.pr && (
+              <Text color="green">
+                {'  '}
+                <Link href={working.pr.url} label={`PR #${working.pr.number} opened`} />
+              </Text>
+            )}
           </Box>
         )}
         {now && (
