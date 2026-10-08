@@ -45,6 +45,44 @@ export const isIssueRead = (tool: string, input: Record<string, unknown>): boole
   return tool.startsWith('mcp__') && /(?:get|read|fetch|view)_?(?:issue|ticket)|(?:issue|ticket)_?(?:get|read|view)|getjiraissue/i.test(tool)
 }
 
+// Which issue a read is for, from the call's own arguments: gh's number, the fetched link, or a connector's id field
+export const issueRefFromRead = (tool: string, input: Record<string, unknown>): IssueRef | null => {
+  if (tool === 'Bash') {
+    const command = String(input.command ?? '')
+    const number = command.match(/\bgh\s+issue\s+view\s+#?(\d+)/)?.[1]
+    const repo = command.match(/(?:--repo|-R)[\s=]+([\w.-]+\/[\w.-]+)/)?.[1]
+    const url = command.match(GITHUB_ISSUE_URL)
+    if (url) return findIssueRef(url[0])
+    return number ? { key: `#${number}`, number: Number(number), ...(repo ? { repo } : {}) } : null
+  }
+  if (tool === 'WebFetch') {
+    return findIssueRef(String(input.url ?? ''))
+  }
+  for (const field of ['issue_number', 'issueNumber', 'number']) {
+    const value = input[field]
+    if (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value))) {
+      return { key: `#${value}`, number: Number(value) }
+    }
+  }
+  for (const field of ['issueIdOrKey', 'issueKey', 'issue_key', 'issueId', 'id', 'key', 'identifier']) {
+    const value = input[field]
+    if (typeof value === 'string' && /^[A-Z][A-Z0-9]{1,9}-\d{1,6}$/.test(value)) {
+      return { key: value }
+    }
+  }
+  return null
+}
+
+// A short fingerprint of an issue's text, so the same text is never summarized twice
+export const fingerprint = (text: string): string => {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${text.length}:${hash.toString(36)}`
+}
+
 // The last pull request link in a tool's output (gh pr create prints it)
 export const findPrUrl = (text: string): { url: string; number: number } | null => {
   const all = [...text.matchAll(GITHUB_PR_URL)]

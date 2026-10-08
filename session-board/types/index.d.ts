@@ -27,6 +27,8 @@ export type Issue = {
   isPinned?: boolean
   // Named but not read yet: shown by key until its text is found
   isPending?: boolean
+  // Fingerprint of the text last summarized, so re-reading the same issue costs nothing
+  sourceHash?: string
   at?: number
 }
 

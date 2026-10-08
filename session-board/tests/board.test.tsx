@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, RenderPropsOf } from 'claude-code'
 
-import { findIssueRef } from '../hooks/issue'
+import { findIssueRef, fingerprint, issueRefFromRead } from '../hooks/issue'
 
 const PANE = { bodyColumns: 60 } as unknown as RenderPropsOf['Pane']
 const settle = () => new Promise(r => setTimeout(r, 50))
@@ -51,6 +51,9 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
     ({ value: { isAnswered: true, text: JSON.stringify(summary(e.prompt)), usage: {} } }) as never,
   )
   on('tool.call', (_$, e) => {
+    if (e.tool === 'Bash' && e.command.startsWith('gh issue view 57')) {
+      return { result: {}, text: 'title: Login fails after password reset\nstate: OPEN\nnumber: 57\n--\nUsers get a 500.' } as never
+    }
     if (e.tool === 'Bash' && e.command.startsWith('gh issue view 99')) {
       return { result: {}, text: 'title: Unrelated dark mode request\nnumber: 99' } as never
     }
@@ -264,4 +267,36 @@ test('counts files changed with git, however Claude changed them', async ($, on)
   await settle()
 
   expect(await ui.find({ text: /3 files changed · 1 command run/ })).toBeDefined()
+})
+
+test('knows which issue a read is for, from the call itself', () => {
+  expect(issueRefFromRead('Bash', { command: 'gh issue view 57 --comments' })?.key).toBe('#57')
+  expect(issueRefFromRead('Bash', { command: 'gh issue view 12 --repo acme/app' })).toEqual({ key: '#12', number: 12, repo: 'acme/app' })
+  expect(issueRefFromRead('WebFetch', { url: 'https://github.com/acme/app/issues/88' })?.key).toBe('#88')
+  expect(issueRefFromRead('mcp__github__get_issue', { owner: 'acme', repo: 'app', issue_number: 31 })?.key).toBe('#31')
+  expect(issueRefFromRead('mcp__atlassian__getJiraIssue', { issueIdOrKey: 'PAY-7' })?.key).toBe('PAY-7')
+  expect(fingerprint('same text')).toBe(fingerprint('same text'))
+  expect(fingerprint('same text')).not.toBe(fingerprint('same text!'))
+})
+
+test('summarizes an issue once, however often Claude re-reads it', async ($, on) => {
+  let issueCalls = 0
+  world(on, prompt => {
+    if (!prompt.includes('issue tracker')) return { done: [], ask: null }
+    issueCalls++
+    return { key: '#57', title: 'Login fails after password reset', summary: 'Users hit a 500 after a reset.', state: 'open' }
+  })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+
+  await $.prompt.submit({ text: 'take issue #57' } as never)
+  await settle()
+  expect(issueCalls).toBe(1)
+
+  // Claude reads the same issue twice, then a related one, while #57 is pinned
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 57', description: 'Read the issue' })
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 57 --comments', description: 'Read the comments' })
+  await $.tool.call({ tool: 'Bash', command: 'gh issue view 99', description: 'Read a related issue' })
+  await settle()
+  expect(issueCalls).toBe(1)
+  expect(await ui.find({ text: /Working on #57/ })).toBeDefined()
 })

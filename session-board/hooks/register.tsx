@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Activity, Done, Issue, Live, Need, Upcoming } from '../types'
-import { findIssueRef, findPrUrl, githubIssueArgv, isIssueRead, issuePrompt, parseIssueReply } from './issue'
+import { findIssueRef, findPrUrl, fingerprint, githubIssueArgv, isIssueRead, issuePrompt, issueRefFromRead, parseIssueReply } from './issue'
 import type { IssueRef } from './issue'
 
 const PANE = 'session-board'
@@ -129,6 +129,17 @@ const followIssue = async ($: EngineInterface, ref: IssueRef) => {
 
 // Summarizes an issue's text onto the board, keeping a PR already linked to the same issue
 const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null, isPinned: boolean) => {
+  // Skip the model call when the summary is already on the board, or would be thrown away
+  const current = await read($, issue)
+  const hash = fingerprint(text.trim())
+  if (current && !current.isPending) {
+    const isSameText = current.sourceHash === hash
+    const isSameIssue = !isPinned && ref?.key === current.key
+    const isOtherWhilePinned = !isPinned && current.isPinned && ref?.key !== undefined && ref.key !== current.key
+    if (isSameText || isSameIssue || isOtherWhilePinned) {
+      return
+    }
+  }
   const summary = await summarizeIssue($, text, ref)
   if (!summary) {
     return
@@ -140,7 +151,14 @@ const learnIssue = async ($: EngineInterface, text: string, ref: IssueRef | null
       return current
     }
     const pr = current?.key === summary.key ? current.pr : undefined
-    return { ...summary, url: summary.url ?? (current?.key === summary.key ? current.url : undefined), pr, isPinned: isPinned || current?.isPinned, at }
+    return {
+      ...summary,
+      url: summary.url ?? (current?.key === summary.key ? current.url : undefined),
+      pr,
+      isPinned: isPinned || current?.isPinned,
+      sourceHash: hash,
+      at,
+    }
   })
   await save($)
 }
@@ -415,7 +433,7 @@ export const register: Register = on => {
 
       const input = e as unknown as Record<string, unknown>
       if (ran.text && isIssueRead(e.tool, input)) {
-        void learnIssue($, ran.text, findIssueRef(`issue ${JSON.stringify(input)}`), false).catch(() => undefined)
+        void learnIssue($, ran.text, issueRefFromRead(e.tool, input), false).catch(() => undefined)
       }
       const opensPr =
         (e.tool === 'Bash' && /\bgh\s+pr\s+create\b/.test(e.command)) || /create_?pull_?request/i.test(e.tool)
