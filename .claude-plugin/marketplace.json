@@ -10,6 +10,11 @@
       "name": "session-board",
       "source": "./session-board",
       "description": "A sidebar showing the issue you're on, what needs you, what's next, what got done, and what it cost"
+    },
+    {
+      "name": "copy-chips",
+      "source": "./copy-chips",
+      "description": "Click-to-copy chips above the prompt for the commands, ids, paths and URLs in Claude's last replies"
     }
   ]
 }

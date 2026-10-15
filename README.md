@@ -5,6 +5,7 @@
 | Mod | What it does |
 | --- | --- |
 | [session-board](session-board/) | A sidebar showing the issue you're on, live progress, what needs you, what got done, and what it cost |
+| [copy-chips](copy-chips/) | Click-to-copy chips above the prompt for the commands, ids, paths and URLs in Claude's replies |
 
 ## Get started
 

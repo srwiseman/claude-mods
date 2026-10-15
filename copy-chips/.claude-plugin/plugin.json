@@ -1,0 +1,12 @@
+{
+  "name": "copy-chips",
+  "version": "0.1.0",
+  "description": "Click-to-copy chips above the prompt for the commands, ids, paths and URLs in Claude's last replies",
+  "author": {
+    "name": "srwiseman",
+    "url": "https://github.com/srwiseman"
+  },
+  "homepage": "https://github.com/srwiseman/claude-mods/tree/main/copy-chips",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
