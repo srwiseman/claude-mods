@@ -8,7 +8,9 @@ export type Upcoming = { id: string; label: string; at?: number; taskId?: string
 export type Need = { id: string; label: string; at: number }
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 // usd as /cost totals it; tokens summed from each turn, so a setup that reports no price still shows use
-export type Spend = { usd?: number; limits: Limit[]; tokens?: number; isUnpriced?: boolean }
+// context: the live context window's fill, as the status line reports it
+export type ContextFill = { tokens?: number; window: number; percent?: number }
+export type Spend = { usd?: number; limits: Limit[]; tokens?: number; isUnpriced?: boolean; context?: ContextFill }
 // The turn running now: what it was asked, what it is doing, and the steps finished so far
 export type Live = {
   startedAt: number

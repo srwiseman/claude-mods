@@ -225,6 +225,7 @@ const refreshSpend = async ($: EngineInterface) => {
     ...s,
     usd: usage.cost?.usd ?? s.usd,
     limits: usage.rateLimits.length ? usage.rateLimits : s.limits,
+    context: usage.context.window ? usage.context : s.context,
     // Tokens spent but nothing priced: this setup does not report a cost to mods
     isUnpriced: (s.tokens ?? 0) > 0 && !usage.cost?.usd,
   }))
@@ -305,7 +306,8 @@ const filesLabel = (a: { edits: number; filesChanged?: number }) =>
     ? `${a.filesChanged} file${a.filesChanged === 1 ? '' : 's'} changed`
     : `${a.edits} file edit${a.edits === 1 ? '' : 's'}`
 
-const tokenCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+const tokenCount = (n: number) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n)
 
 const addNeed = async ($: EngineInterface, id: string, label: string) => {
   const need: Need = { id, label, at: await $.clock.now() }
@@ -372,6 +374,10 @@ const readBoard = async ($: EngineInterface) => ({
 })
 
 const LIMIT_SHORT: Record<string, string> = { five_hour: '5h', seven_day: 'week', spend_limit: 'spend' }
+// How full the context window is, as a whole percentage; the engine's figure, or worked out from its tokens
+const contextPercent = (c: { tokens?: number; window: number; percent?: number } | undefined) =>
+  c === undefined ? undefined : (c.percent ?? (c.tokens !== undefined && c.window ? Math.round((c.tokens / c.window) * 100) : undefined))
+
 const meter = (percent: number) => {
   const filled = Math.max(0, Math.min(8, Math.round(percent / 12.5)))
   return '▓'.repeat(filled) + '░'.repeat(8 - filled)
@@ -478,6 +484,7 @@ export const register: Register = on => {
       ...s,
       usd: e.cost?.usd ?? s.usd,
       limits: e.rateLimits.length ? e.rateLimits : s.limits,
+      context: e.context.window ? e.context : s.context,
       isUnpriced: (s.tokens ?? 0) > 0 && !(e.cost?.usd ?? s.usd),
     }))
 
@@ -582,7 +589,7 @@ export const register: Register = on => {
     }
 
     if (e.tool === 'AskUserQuestion') {
-      const first = e.questions?.[0]?.question
+      const first = (e.questions as readonly { question?: string }[] | undefined)?.[0]?.question
       await addNeed($, id, `Answer: ${oneLine(first ?? 'a question from Claude', 55)}`)
     } else if (e.tool === 'ExitPlanMode') {
       await addNeed($, id, 'Review and approve the plan')
@@ -614,7 +621,7 @@ export const register: Register = on => {
         void learnIssue($, text, issueRefFromRead(e.tool, input), false).catch(() => undefined)
       }
       const opensPr =
-        (e.tool === 'Bash' && /\bgh\s+pr\s+create\b/.test(e.command)) || /create_?pull_?request/i.test(e.tool)
+        (e.tool === 'Bash' && /\bgh\s+pr\s+create\b/.test(String(e.command))) || /create_?pull_?request/i.test(e.tool)
       const pr = opensPr && ran.text ? findPrUrl(ran.text) : null
       if (pr) {
         await update($, issue, current => (current ? { ...current, pr } : current))
@@ -647,7 +654,7 @@ export const register: Register = on => {
         await putUpcoming($, {
           id: job.id,
           label: `${job.humanSchedule}: ${oneLine(e.prompt, 45)}`,
-          prompt: e.prompt,
+          prompt: String(e.prompt),
           isRecurring: job.recurring !== false,
         })
       } else if (e.tool === 'CronDelete') {
@@ -658,7 +665,7 @@ export const register: Register = on => {
           await update($, upcoming, list => list.filter(u => u.id !== 'wakeup'))
         } else {
           const at = wake.scheduledFor
-          await putUpcoming($, { id: 'wakeup', at, prompt: e.prompt, label: `Wake at ${clockTime(at)}: ${oneLine(e.reason, 45)}` })
+          await putUpcoming($, { id: 'wakeup', at, prompt: String(e.prompt), label: `Wake at ${clockTime(at)}: ${oneLine(e.reason, 45)}` })
         }
       }
 
@@ -779,7 +786,8 @@ export const register: Register = on => {
     const limit = [...b.cost.limits].sort((x, y) => y.percentUsed - x.percentUsed)[0]
     const shown = b.isExpanded ? b.log.slice(-12) : b.log.slice(-3)
     const hidden = b.log.length - shown.length
-    const hasCost = b.cost.usd !== undefined || b.cost.isUnpriced || limit !== undefined
+    const ctx = contextPercent(b.cost.context)
+    const hasCost = b.cost.usd !== undefined || b.cost.isUnpriced || limit !== undefined || ctx !== undefined
     const isEmpty = !b.working && !b.now && !b.waiting.length && !b.log.length && !b.next.length
     const w = b.working
     // Tokens processed are mostly cached context re-read each step: shown only where no cost is reported
@@ -924,6 +932,12 @@ export const register: Register = on => {
                     </Text>
                   )}
                 </Box>
+                {ctx !== undefined && (
+                  <Text color={ctx >= 80 ? 'yellow' : undefined} dimColor={ctx < 80} wrap="truncate-end">
+                    {`Context ${meter(ctx)} ${ctx}%`}
+                    {b.cost.context?.tokens !== undefined ? ` · ${tokenCount(b.cost.context.tokens)} / ${tokenCount(b.cost.context.window)}` : ''}
+                  </Text>
+                )}
               </Box>
             )}
             {(b.log.length > 0 || w) && (
@@ -953,6 +967,7 @@ export const register: Register = on => {
     }
     const { Box, Text } = $.ui.resolve(e)
     const first = b.waiting[0]
+    const bandCtx = contextPercent(b.cost.context)
 
     return (
       <Box>
@@ -977,6 +992,9 @@ export const register: Register = on => {
             </Text>
           )}
           {b.cost.usd ? <Text dimColor>{` · ${money(b.cost.usd)}`}</Text> : null}
+          {bandCtx !== undefined ? (
+            <Text color={bandCtx >= 80 ? 'yellow' : undefined} dimColor={bandCtx < 80}>{` · ctx ${bandCtx}%`}</Text>
+          ) : null}
         </Text>
       </Box>
     )

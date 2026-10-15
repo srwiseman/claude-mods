@@ -21,6 +21,8 @@ let mtimes: Record<string, number> = {}
 // Every model call the board made, and whether the account refuses Haiku 5.5
 let modelCalls: { model: string; effort?: string }[] = []
 let refuseNewest = false
+// The context window as the engine reports it at session start
+let contextFill: object = {}
 
 // The plugin's store, kept where a test can look at it
 const world = (on: On, summary: (prompt: string) => object, store = new Map<string, unknown>(), usd = 0.5) => {
@@ -29,6 +31,7 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   mtimes = {}
   modelCalls = []
   refuseNewest = false
+  contextFill = {}
   gitAnswers = {
     'git rev-parse HEAD': 'abc123\n',
     'git rev-parse --abbrev-ref HEAD': 'main\n',
@@ -55,7 +58,7 @@ const world = (on: On, summary: (prompt: string) => object, store = new Map<stri
   // What the engine draws above the prompt when the board has nothing to say there
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('classic.PermissionRequest', () => ({}))
-  on('session.usage', () => ({ value: { startedAt: NOW, context: {}, rateLimits: [], cost: { usd } } }) as never)
+  on('session.usage', () => ({ value: { startedAt: NOW, context: contextFill, rateLimits: [], cost: { usd } } }) as never)
   on('session.measure', (_$, e) => ({ changed: e.changed }) as never)
   on('session.repo', () => ({ value: { root: '/repo', remote: 'https://github.com/acme/app.git', internal: false, name: null } }) as never)
   on('session.cwd', () => ({ value: '/repo' }) as never)
@@ -595,4 +598,20 @@ test('falls back to Haiku 4.5 once where 5.5 is refused, and stays there', async
   await $.turn.complete(ended('Again.', 't2'))
   await settle()
   expect(modelCalls.map(c => c.model)).toEqual(['claude-haiku-5-5', 'claude-haiku-4-5-20251001', 'claude-haiku-4-5-20251001'])
+})
+
+test('shows how full the context window is, in the footer and the band', async ($, on) => {
+  world(on, () => ({ done: [], ask: null }))
+  contextFill = { tokens: 380_000, window: 1_000_000, percent: 38 }
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const band = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(await band.find({ text: /ctx 38%/ })).toBeDefined()
+
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'session-board' })
+  expect(await ui.find({ type: 'Text', text: /^Context ▓▓▓░░░░░ 38% · 380k \/ 1M$/ })).toBeDefined()
+
+  await $.session.measure({ context: { tokens: 850_000, window: 1_000_000, percent: 85 }, rateLimits: [], changed: ['context'] } as never)
+  const near = await ui.find({ type: 'Text', text: /^Context ▓▓▓▓▓▓▓░ 85%/ })
+  expect(near?.props.color).toBe('yellow')
 })

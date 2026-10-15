@@ -22,13 +22,14 @@ A **Session** pane beside the Claude Code transcript that shows, at a glance, wh
 
  ───────────────────────────────────────
  $1.84                   5h ▓▓▓░░░░░ 42%
+ Context ▓▓▓░░░░░ 38% · 380k / 1M
                          [ Copy summary ]
 ```
 
 Sections only appear when they have something to say. When the pane is closed, or the terminal is too narrow for it, the same picture shrinks to one line above the prompt while Claude works or something needs you:
 
 ```
-#57 Login fails · ● Push branch and open PR · 12m · ⚑ Approve git push · $1.84
+#57 Login fails · ● Push branch and open PR · 12m · ⚑ Approve git push · $1.84 · ctx 38%
 ```
 
 ## Sections
@@ -37,7 +38,7 @@ Sections only appear when they have something to say. When the pane is closed, o
 - **⚑ Needs you**: shown only when something is waiting on you: a permission dialog actually put to you (none in auto mode unless it asks), a question or plan to approve, or a few-word summary of what Claude's last message asks you to do. The count also shows in the status line and the pane's title.
 - **Status**: `● Working · 12m` with the last steps finished (from the short descriptions Claude gives its commands) and the one under way; `○ Idle` otherwise. Scheduled wakeups, recurring jobs and background tasks show beneath it as `⏱` lines. No model calls.
 - **Done**: plain-English results of each turn ("Fixed login after password resets"), not a list of commands, newest three with `+ N earlier` to expand; hover one for when it happened and what it took. The header counts the files this work changes, as a PR would show them (on a feature branch, the branch against where it left the default branch; on the default branch, your own commits since the session began, never what a pull brought in; plus uncommitted edits and files created during the session), and the commands run.
-- **Footer**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), and your nearest usage limit as a meter, yellow from 80%. Where a setup reports no cost to mods, it says so instead of showing $0.00, and shows tokens processed instead.
+- **Footer**: the session's running cost as `/cost` totals it (an API-equivalent estimate on a subscription), your nearest usage limit as a meter, and how full the context window is (`Context ▓▓▓░░░░░ 38% · 380k / 1M`), each yellow from 80%. Where a setup reports no cost to mods, it says so instead of showing $0.00, and shows tokens processed instead.
 - **Copy summary** (or `c` while the pane has focus): copies the issue, PR link, Done list and totals as a short write-up for a PR description, standup or status message.
 
 The pane opens by itself in terminals 144+ columns wide; otherwise type `/board`, or rely on the band above the prompt. Links are clickable in terminals that support them (iTerm2, Ghostty, WezTerm, Kitty, VS Code's terminal) and in the Desktop app. Hover details need mouse support (Claude Code's fullscreen layout, or the Desktop app).
