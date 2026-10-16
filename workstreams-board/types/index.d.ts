@@ -47,8 +47,8 @@ export type Board = {
   updatedAt: number
 }
 
-/** A Refresh in flight, and what the last one came to. */
-export type Refresh = { isBusy: boolean; note: string | null }
+/** A Refresh in flight, what the last one came to, and the automatic ones failed in a row. */
+export type Refresh = { isBusy: boolean; note: string | null; failures: number }
 
 /** An agent the round dispatched (a layer's stream agent or a reviewer). */
 export type AgentRow = { id: string; description: string; type: string; status: string }

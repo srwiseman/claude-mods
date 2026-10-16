@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyOutput, applyPlan, emptyBoard, foldCall, headsOf, ordered, phaseOf, replay, roundPullRequests, subcommandOf } from '../hooks/board'
+import { applyOutput, applyPlan, applyPullList, emptyBoard, foldCall, headsOf, ordered, phaseOf, replay, roundPullRequests, shouldPoll, subcommandOf } from '../hooks/board'
 import type { Row } from '../hooks/board'
 
 const SCRIPT = 'node "/plugins/workstreams/scripts/workstreams.ts"'
@@ -87,6 +87,7 @@ test('the round reads fill the board and the pane draws each layer', async ($, o
     expect(await ui.find({ type: 'Text', text: / review / })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /issues #41 #42/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /watch armed/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /auto every 3m/ })).toBeDefined()
     // lsp-core is planned (named by the watch) but has no pull request yet.
     expect(await ui.find({ type: 'Text', text: /^lsp-core$/ })).toBeDefined()
     await ui.unmount()
@@ -171,4 +172,41 @@ test('the plan comment adds each planned layer, in plan order, and only for this
   ])
   expect(foldCall(board, view('Round 21 plan\n- Branch: `old`'), 1)).toBe(board)
   expect(applyPlan(board, 'no branches here', 1)).toBe(board)
+})
+
+test('auto-refresh reads only a quiet, unfinished round, and stops after three failures', async () => {
+  const min = 60_000
+  let board = applyOutput(emptyBoard(), 'rounds', { rounds: [{ plan: 'p', issues: [{ number: 41 }] }] }, 0)
+  board = applyOutput(board, 'pr-state', { pullRequest: 301, head: 'a', state: 'fixing' }, 0)
+  expect(shouldPoll(board, 2 * min, 3, 0)).toBe(false) // a tick 2m ago
+  expect(shouldPoll(board, 3 * min, 3, 0)).toBe(true) // quiet for 3m
+  expect(shouldPoll(board, 3 * min, 0, 0)).toBe(false) // off
+  expect(shouldPoll(board, 3 * min, 3, 3)).toBe(false) // paused
+  expect(shouldPoll({ ...board, phase: 'round-end' }, 3 * min, 3, 0)).toBe(false)
+  expect(shouldPoll(emptyBoard(), 3 * min, 3, 0)).toBe(false) // no round on the board
+  const finished = applyOutput(board, 'pr-state', { pullRequest: 301, head: 'a', state: 'merged' }, 0)
+  expect(shouldPoll(finished, 3 * min, 3, 0)).toBe(false)
+  // A planned layer with no pull request yet keeps it polling.
+  const planned = foldCall(finished, { tool: 'Monitor', input: { command: `${SCRIPT} watch --heads a,b` }, result: {} }, 0)
+  expect(shouldPoll(planned, 3 * min, 3, 0)).toBe(true)
+})
+
+test('gh pr list alone attaches a planned branch and stacks by base branch', async () => {
+  let board = foldCall(emptyBoard(), { tool: 'Monitor', input: { command: `${SCRIPT} watch --heads a1,a2` }, result: {} }, 0)
+  const pulls = [
+    { number: 501, headRefName: 'a1', baseRefName: 'main' },
+    { number: 502, headRefName: 'a2', baseRefName: 'a1' },
+  ]
+  board = applyPullList(board, pulls, roundPullRequests(board, pulls), 1)
+  expect(ordered(board.layers).map(layer => [layer.head, layer.pullRequest, layer.stackedOn])).toEqual([
+    ['a1', 501, null],
+    ['a2', 502, 501],
+  ])
+})
+
+test('the auto-refresh setting turns polling off', { options: { autoRefresh: 'off' } }, async ($, on) => {
+  mock.clock(on)
+  const ui = await $.ui.mount({ plugin: 'workstreams-board', surface: 'terminal', ...PANE })
+  expect(await ui.find({ key: 'refresh' })).toBeDefined()
+  await ui.unmount()
 })
