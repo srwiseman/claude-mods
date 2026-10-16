@@ -1,6 +1,6 @@
 {
   "name": "workstreams-board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A live pane for a workstreams round: each stack layer's place in the review loop, its CI, threads, agents and collisions",
   "author": {
     "name": "srwiseman",

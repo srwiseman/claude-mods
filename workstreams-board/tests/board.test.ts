@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyOutput, emptyBoard, headsOf, ordered, phaseOf, subcommandOf } from '../hooks/board'
+import { applyOutput, applyPlan, emptyBoard, foldCall, headsOf, ordered, phaseOf, replay, roundPullRequests, subcommandOf } from '../hooks/board'
+import type { Row } from '../hooks/board'
 
 const SCRIPT = 'node "/plugins/workstreams/scripts/workstreams.ts"'
 
@@ -90,4 +91,84 @@ test('the round reads fill the board and the pane draws each layer', async ($, o
     expect(await ui.find({ type: 'Text', text: /^lsp-core$/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('replays a round from the session history, as if the mod had watched it', async () => {
+  const bash = (command: string, out: unknown) => ({
+    tool: 'Bash',
+    input: { command },
+    result: { stdout: JSON.stringify(out), stderr: '', interrupted: false },
+  })
+  const rows: Row[] = [
+    { role: 'user', text: '/workstreams:start milestone 7', toolUses: [] },
+    {
+      role: 'assistant',
+      text: '',
+      toolUses: [
+        { tool: 'Skill', input: { skill: 'workstreams:start' }, text: 'ok' },
+        bash(`${SCRIPT} rounds --milestone 7 --json`, { rounds: [{ plan: '<plan> m7', issues: [{ number: 41 }] }] }),
+        bash(`${SCRIPT} pr-state 301 --json`, { pullRequest: 301, head: 'a', state: 'done', verdict: 'green' }),
+        bash(`${SCRIPT} pr-state 302 --json`, { pullRequest: 302, head: 'b', state: 'fixing', unresolvedThreads: 2 }),
+        { tool: 'Monitor', input: { command: `${SCRIPT} watch --heads a,b,c` }, result: { taskId: 'w9', timeoutMs: 3_600_000 } },
+        { tool: 'Read', input: { file_path: '/p/workstreams/skills/start/tick.md' }, text: '…' },
+        // A call still running when history was read has no outcome, and is skipped.
+        { tool: 'Skill', input: { skill: 'workstreams:review' } },
+      ],
+    },
+  ]
+  const board = replay(rows, 1000)
+  expect(board.plan).toBe('<plan> m7')
+  expect(board.phase).toBe('tick')
+  expect(board.phaseAt).toBe(null)
+  expect(board.script).toBe('/plugins/workstreams/scripts/workstreams.ts')
+  expect(board.watch).toEqual({ taskId: 'w9', armedAt: null, deadline: null, heads: ['a', 'b', 'c'] })
+  expect(ordered(board.layers).map(layer => [layer.head, layer.state])).toEqual([
+    ['a', 'done'],
+    ['b', 'fixing'],
+    ['c', null],
+  ])
+
+  // The watch's task notification takes the watch down.
+  const ended = replay([...rows, { role: 'user', text: '<task-notification>w9 completed</task-notification>', toolUses: [] }], 1000)
+  expect(ended.watch).toBe(null)
+})
+
+test('Refresh finds the round pull requests the way the orchestrator does', async () => {
+  let board = applyOutput(emptyBoard(), 'rounds', { rounds: [{ plan: 'p', issues: [{ number: 41 }, { number: 42 }] }] }, 1)
+  board = foldCall(board, { tool: 'Monitor', input: { command: `${SCRIPT} watch --heads planned` }, result: {} }, 1)
+  const pulls = [
+    { number: 300, headRefName: 'a', closingIssuesReferences: [{ number: 41 }] },
+    { number: 310, headRefName: 'a', closingIssuesReferences: [{ number: 41 }] },
+    { number: 305, headRefName: 'planned', closingIssuesReferences: [] },
+    { number: 306, headRefName: 'other', closingIssuesReferences: [{ number: 99 }] },
+  ]
+  // The newest per branch: 310 replaces 300; 305 by its head; 306 is not this round's.
+  expect(roundPullRequests(board, pulls)).toEqual([305, 310])
+})
+
+test('an empty board offers Refresh', async ($, on) => {
+  mock.clock(on)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'workstreams-board', surface, ...PANE })
+    expect(await ui.find({ key: 'refresh' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No workstreams round/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('the plan comment adds each planned layer, in plan order, and only for this round', async () => {
+  const plan = 'Round 22 plan, approved 2026-10-14T23:13Z.\n\n**A1**\n- Branch: `wktr-263-isolated-agents`, off `main`\n**A2**\n- Branch: `wktr-449-guard-cd`, on `wktr-263-isolated-agents`\n**B1**\n- Branch: `wktr-443-mark-head`, off `main`'
+  const view = (stdout: string) => ({ tool: 'Bash', input: { command: 'gh issue view 438 --json comments --jq x' }, result: { stdout } })
+
+  // Before rounds names the plan, an issue's text is not taken for one.
+  expect(foldCall(emptyBoard(), view(plan), 1).layers).toEqual([])
+
+  const board = applyOutput(emptyBoard(), 'rounds', { rounds: [{ plan: 'Round 22 plan, approved 2026-10-14T23:13Z.', issues: [] }] }, 1)
+  expect(ordered(foldCall(board, view(plan), 1).layers).map(layer => layer.head)).toEqual([
+    'wktr-263-isolated-agents',
+    'wktr-449-guard-cd',
+    'wktr-443-mark-head',
+  ])
+  expect(foldCall(board, view('Round 21 plan\n- Branch: `old`'), 1)).toBe(board)
+  expect(applyPlan(board, 'no branches here', 1)).toBe(board)
 })

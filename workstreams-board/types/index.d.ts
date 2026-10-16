@@ -30,24 +30,31 @@ export type Layer = {
   updatedAt: number
 }
 
-export type Watch = { taskId: string | null; armedAt: number; deadline: number | null; heads: string[] }
+/** The watch that wakes the round. A watch rebuilt from history has no armedAt or deadline. */
+export type Watch = { taskId: string | null; armedAt: number | null; deadline: number | null; heads: string[] }
 
 export type Board = {
   /** The round's plan line, from `rounds`. */
   plan: string | null
   issues: number[]
   phase: Phase | null
-  phaseAt: number
+  /** When the phase began; null when it was rebuilt from history. */
+  phaseAt: number | null
   layers: Layer[]
   watch: Watch | null
+  /** The workstreams script, as the round last ran it: what Refresh runs. */
+  script: string | null
   updatedAt: number
 }
+
+/** A Refresh in flight, and what the last one came to. */
+export type Refresh = { isBusy: boolean; note: string | null }
 
 /** An agent the round dispatched (a layer's stream agent or a reviewer). */
 export type AgentRow = { id: string; description: string; type: string; status: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'workstreams-board': { board: Board; agents: AgentRow[]; autoOpened: boolean; tick: number }
+    'workstreams-board': { board: Board; agents: AgentRow[]; autoOpened: boolean; tick: number; refresh: Refresh }
   }
 }

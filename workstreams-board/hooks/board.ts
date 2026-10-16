@@ -10,11 +10,15 @@ export const emptyBoard = (): Board => ({
   plan: null,
   issues: [],
   phase: null,
-  phaseAt: 0,
+  phaseAt: null,
   layers: [],
   watch: null,
+  script: null,
   updatedAt: 0,
 })
+
+export const isActive = (board: Board): boolean =>
+  board.layers.length > 0 || board.phase !== null || board.plan !== null
 
 export type Subcommand = 'rounds' | 'pr-state' | 'intersect' | 'watch'
 
@@ -206,10 +210,11 @@ const applyIntersect = (board: Board, out: Record<string, unknown>, now: number)
   return { ...board, layers, updatedAt: now }
 }
 
-/** Records the watch the model armed, and a planned layer for each head it names. */
+/** Records the watch the model armed, and a planned layer for each head it names.
+ *  `armedAt` is null for a watch rebuilt from history, whose start nobody knows. */
 export const applyWatch = (
   board: Board,
-  watch: { taskId: string | null; heads: string[]; timeoutMs: number | null },
+  watch: { taskId: string | null; heads: string[]; timeoutMs: number | null; armedAt: number | null },
   now: number,
 ): Board => {
   let layers = board.layers
@@ -217,11 +222,11 @@ export const applyWatch = (
     if (layers.some(layer => layer.head === head)) continue
     layers = [...layers, blank(head, now)]
   }
-  const deadline = watch.timeoutMs ? now + watch.timeoutMs : null
+  const deadline = watch.armedAt !== null && watch.timeoutMs ? watch.armedAt + watch.timeoutMs : null
   return {
     ...board,
     layers,
-    watch: { taskId: watch.taskId, armedAt: now, deadline, heads: watch.heads },
+    watch: { taskId: watch.taskId, armedAt: watch.armedAt, deadline, heads: watch.heads },
     updatedAt: now,
   }
 }
@@ -280,4 +285,146 @@ export const span = (ms: number): string => {
   if (s < 60) return `${s}s`
   const m = Math.round(s / 60)
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
+}
+
+const PLAN_BRANCH = /Branch:\s*`([^`]+)`/g
+
+/**
+ * The layers a plan comment names, as planned branches in plan order. The
+ * plan's shape is each repository's own; this reads the `Branch: \`name\``
+ * lines the bje-settings plan shape writes, and adds nothing where it finds none.
+ */
+export const applyPlan = (board: Board, text: string, now: number): Board => {
+  const heads = [...text.matchAll(PLAN_BRANCH)].map(match => match[1]!).filter(Boolean)
+  if (heads.length === 0) return board
+  let layers = board.layers
+  for (const head of heads) {
+    if (!layers.some(layer => layer.head === head)) layers = [...layers, blank(head, now)]
+  }
+  return layers === board.layers ? board : { ...board, layers, updatedAt: now }
+}
+
+const ISSUE_VIEW = /\bgh issue view\b/
+
+/** One tool call as the board reads it: a live one, or one from the session's history. */
+export type Call = {
+  tool: string
+  input: Record<string, unknown>
+  result?: unknown
+  text?: string
+  isError?: boolean
+}
+
+const SCRIPT_PATH = /(["']?)(\/[^"'\s]*\/scripts\/workstreams\.ts)\1/
+
+/** The script path a command runs, for Refresh to run it the same way. */
+export const scriptOf = (command: string): string | null => SCRIPT_PATH.exec(command)?.[2] ?? null
+
+const stdoutOf = (call: Call): string => {
+  const result = call.result as { stdout?: unknown } | undefined
+  return typeof result?.stdout === 'string' ? result.stdout : (call.text ?? '')
+}
+
+/**
+ * Folds one finished tool call into the board. Live calls and replayed ones
+ * go through here alike, so the board rebuilt from history is the board the
+ * live hooks would have drawn. `isReplay` marks times nobody recorded.
+ */
+export const foldCall = (board: Board, call: Call, now: number, isReplay = false): Board => {
+  const at = isReplay ? null : now
+  switch (call.tool) {
+    case 'Bash': {
+      const command = str(call.input.command) ?? ''
+      const sub = subcommandOf(command)
+      // The orchestrator reads the plan comment off a round issue.
+      if (sub === null && ISSUE_VIEW.test(command) && !call.isError) {
+        const text = stdoutOf(call)
+        const isThisPlan = board.plan !== null && text.trimStart().startsWith(board.plan)
+        return isThisPlan ? applyPlan(board, text, now) : board
+      }
+      if (sub === null || call.isError) return board
+      const script = scriptOf(command) ?? board.script
+      const out = sub === 'watch' ? null : parseJson(stdoutOf(call))
+      const next = script === board.script ? board : { ...board, script }
+      return out === null || sub === 'watch' ? next : applyOutput(next, sub, out, now)
+    }
+    case 'Monitor': {
+      const command = str(call.input.command) ?? ''
+      if (subcommandOf(command) !== 'watch' || call.isError) return board
+      const result = call.result as { taskId?: unknown; timeoutMs?: unknown } | undefined
+      const script = scriptOf(command) ?? board.script
+      return applyWatch(
+        { ...board, script },
+        { taskId: str(result?.taskId), heads: headsOf(command), timeoutMs: num(result?.timeoutMs), armedAt: at },
+        now,
+      )
+    }
+    case 'TaskStop': {
+      const id = str(call.input.task_id) ?? str(call.input.shell_id)
+      return board.watch !== null && id !== null && board.watch.taskId === id ? { ...board, watch: null } : board
+    }
+    case 'Skill':
+    case 'Read': {
+      const phase = phaseOf({ skill: str(call.input.skill) ?? undefined, file_path: str(call.input.file_path) ?? undefined })
+      return phase === null ? board : { ...board, phase, phaseAt: at }
+    }
+    default:
+      return board
+  }
+}
+
+/** A row of the session's history, as `$.session.messages()` gives it. */
+export type Row = {
+  role: 'user' | 'assistant'
+  text: string
+  toolUses: readonly { tool: string; input: Record<string, unknown>; result?: unknown; text?: string; isError?: true }[]
+}
+
+const ENDED = /\b(completed|failed|killed|stopped|exited|expired|timed out)\b/i
+
+/**
+ * The board rebuilt from the session's history: every call the round made
+ * before this mod was loaded, folded in order. A user row that reports the
+ * watch's task ended (a task notification) takes the watch down.
+ */
+export const replay = (rows: readonly Row[], now: number): Board => {
+  let board = emptyBoard()
+  for (const row of rows) {
+    if (row.role === 'assistant') {
+      for (const use of row.toolUses) {
+        if (use.result === undefined && use.text === undefined) continue
+        board = foldCall(board, use, now, true)
+      }
+    } else {
+      const id = board.watch?.taskId
+      if (id && row.text.includes(id) && ENDED.test(row.text)) board = { ...board, watch: null }
+    }
+  }
+  return board
+}
+
+/** One pull request from `gh pr list --json number,headRefName,closingIssuesReferences`. */
+export type ListedPull = {
+  number: number
+  headRefName: string
+  closingIssuesReferences?: readonly { number: number }[]
+}
+
+/**
+ * The round's pull requests, as the orchestrator finds them: each that closes
+ * a round issue, or whose head is a branch the board knows, plus every one the
+ * board already holds. When one branch has several, the newest is its layer's.
+ */
+export const roundPullRequests = (board: Board, pulls: readonly ListedPull[]): number[] => {
+  const issues = new Set(board.issues)
+  const heads = new Set(board.layers.map(layer => layer.head))
+  const newest = new Map<string, number>()
+  for (const pull of [...pulls].sort((a, b) => b.number - a.number)) {
+    const closes = (pull.closingIssuesReferences ?? []).some(ref => issues.has(ref.number))
+    if ((closes || heads.has(pull.headRefName)) && !newest.has(pull.headRefName)) {
+      newest.set(pull.headRefName, pull.number)
+    }
+  }
+  const known = board.layers.flatMap(layer => (layer.pullRequest === null ? [] : [layer.pullRequest]))
+  return [...new Set([...newest.values(), ...known])].sort((a, b) => a - b)
 }
