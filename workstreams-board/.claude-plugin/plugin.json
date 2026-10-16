@@ -1,6 +1,6 @@
 {
   "name": "workstreams-board",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A live pane for a workstreams round: each stack layer's place in the review loop, its CI, threads, agents and collisions",
   "author": {
     "name": "srwiseman",
@@ -8,5 +8,20 @@
   },
   "homepage": "https://github.com/srwiseman/claude-mods/tree/main/workstreams-board",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoRefresh": {
+      "type": "string",
+      "title": "Auto-refresh (minutes)",
+      "description": "While a round is on the board and nothing has updated it for this long, read its pull requests from GitHub (gh pr list and pr-state; never git fetch). off reads only on a tick or when you press r.",
+      "default": "3",
+      "options": [
+        "off",
+        "1",
+        "3",
+        "5",
+        "10"
+      ]
+    }
+  }
 }

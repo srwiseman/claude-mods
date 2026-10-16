@@ -6,6 +6,7 @@ import {
   STAGES,
   applyOutput,
   applyPlan,
+  applyPullList,
   emptyBoard,
   foldCall,
   isActive,
@@ -13,6 +14,7 @@ import {
   parseJson,
   replay,
   roundPullRequests,
+  shouldPoll,
   span,
   stageIndex,
   subcommandOf,
@@ -25,7 +27,7 @@ const board = atom({ plugin: 'workstreams-board', key: 'board' } as const, empty
 const agents = atom({ plugin: 'workstreams-board', key: 'agents' } as const, [] as AgentRow[])
 const autoOpened = atom({ plugin: 'workstreams-board', key: 'autoOpened' } as const, false)
 const tick = atom({ plugin: 'workstreams-board', key: 'tick' } as const, 0)
-const refreshing = atom({ plugin: 'workstreams-board', key: 'refresh' } as const, { isBusy: false, note: null } as Refresh)
+const refreshing = atom({ plugin: 'workstreams-board', key: 'refresh' } as const, { isBusy: false, note: null, failures: 0 } as Refresh)
 
 /** Agents a round dispatches: a layer's stream agent and its reviewers. */
 const ROUND_AGENT = /workstreams|pr-review/i
@@ -83,14 +85,30 @@ async function findScript($: EngineInterface): Promise<string | null> {
  * requests, pr-state for each, intersect. For a board history cannot give
  * (a compacted session). Read-only, and only when the person presses it.
  */
-async function refresh($: EngineInterface) {
+/**
+ * Reads the round afresh from GitHub. `full`, the button: as a tick does,
+ * rounds, the plan comment, the round's pull requests, pr-state for each and
+ * intersect. `auto`, the timer: the pull requests and pr-state alone (rounds
+ * and the plan only while the board has no plan), and never intersect, whose
+ * git fetch would run in the checkout the round is working in. Read-only.
+ */
+async function refresh($: EngineInterface, mode: 'full' | 'auto') {
   const busy = await read($, refreshing)
   if (busy.isBusy) return
-  await update($, refreshing, () => ({ isBusy: true, note: 'Refreshing…' }))
-  const say = (note: string) => update($, refreshing, () => ({ isBusy: false, note }))
+  const failures = busy.failures ?? 0
+  await update($, refreshing, () => ({ isBusy: true, note: null, failures }))
+  const done = (note: string) => update($, refreshing, () => ({ isBusy: false, note, failures: 0 }))
+  const fail = (why: string) =>
+    update($, refreshing, () =>
+      mode === 'auto'
+        ? failures + 1 >= 3
+          ? { isBusy: false, note: `Auto-refresh paused after 3 failures (${why}); press r.`, failures: failures + 1 }
+          : { isBusy: false, note: `Auto-refresh failed: ${why}`, failures: failures + 1 }
+        : { isBusy: false, note: `Refresh failed: ${why}`, failures },
+    )
   try {
     const script = await findScript($)
-    if (script === null) return void (await say('Could not find the workstreams plugin.'))
+    if (script === null) return void (await fail('could not find the workstreams plugin'))
     const cwd = await $.session.cwd()
     const run = (args: string[]) => $.process.run(['node', script, ...args, '--json'], { cwd, timeoutMs: 120_000 })
     const foldOut = async (sub: 'rounds' | 'pr-state' | 'intersect', stdout: string) => {
@@ -100,48 +118,67 @@ async function refresh($: EngineInterface) {
       await update($, board, b => applyOutput({ ...(b ?? emptyBoard()), script }, sub, out, now))
     }
 
-    const rounds = await run(['rounds'])
-    const roundCount = (parseJson(rounds.stdout)?.rounds as unknown[] | undefined)?.length ?? 0
-    await foldOut('rounds', rounds.stdout)
+    let roundCount = 1
+    if (mode === 'full' || (await read($, board)).plan === null) {
+      const rounds = await run(['rounds'])
+      roundCount = (parseJson(rounds.stdout)?.rounds as unknown[] | undefined)?.length ?? 0
+      await foldOut('rounds', rounds.stdout)
 
-    // The plan comment names each layer's branch, before any has a pull request.
-    const planned = await read($, board)
-    const first = planned.issues[0]
-    if (planned.plan !== null && first !== undefined) {
-      const filter = `[.comments[].body | select(startswith(${JSON.stringify(planned.plan)}))] | last // ""`
-      const plan = await $.process.run(['gh', 'issue', 'view', String(first), '--json', 'comments', '--jq', filter], {
-        cwd,
-        timeoutMs: 60_000,
-      })
-      const now = await $.clock.now()
-      await update($, board, b => applyPlan(b ?? emptyBoard(), plan.stdout, now))
+      // The plan comment names each layer's branch, before any has a pull request.
+      const planned = await read($, board)
+      const first = planned.issues[0]
+      if (planned.plan !== null && first !== undefined) {
+        const filter = `[.comments[].body | select(startswith(${JSON.stringify(planned.plan)}))] | last // ""`
+        const plan = await $.process.run(['gh', 'issue', 'view', String(first), '--json', 'comments', '--jq', filter], {
+          cwd,
+          timeoutMs: 60_000,
+        })
+        const now = await $.clock.now()
+        await update($, board, b => applyPlan(b ?? emptyBoard(), plan.stdout, now))
+      }
     }
 
     const listed = await $.process.run(
-      ['gh', 'pr', 'list', '--state', 'all', '--limit', '1000', '--json', 'number,headRefName,closingIssuesReferences'],
+      ['gh', 'pr', 'list', '--state', 'all', '--limit', '1000', '--json', 'number,headRefName,baseRefName,closingIssuesReferences'],
       { cwd, timeoutMs: 60_000 },
     )
+    if (listed.exitCode !== 0) return void (await fail(listed.stderr.trim().split('\n')[0] || 'gh pr list failed'))
     let pulls: ListedPull[] = []
     try {
       pulls = JSON.parse(listed.stdout) as ListedPull[]
     } catch {
-      pulls = []
+      return void (await fail('gh pr list gave no JSON'))
     }
     const numbers = roundPullRequests(await read($, board), pulls)
+    const listedAt = await $.clock.now()
+    await update($, board, b => applyPullList(b ?? emptyBoard(), pulls, numbers, listedAt))
     for (const n of numbers) await foldOut('pr-state', (await run(['pr-state', String(n)])).stdout)
-    await foldOut('intersect', (await run(['intersect'])).stdout)
+    if (mode === 'full') await foldOut('intersect', (await run(['intersect'])).stdout)
+
+    // A read that found nothing new still counts: the board is current as of now.
+    const now = await $.clock.now()
+    await update($, board, b => ({ ...(b ?? emptyBoard()), updatedAt: now }))
 
     const current = await read($, board)
     if (!isActive(current)) {
-      return void (await say(roundCount > 1 ? `${roundCount} rounds in flight; run /workstreams:start to pick one.` : 'No round in flight here.'))
+      return void (await done(roundCount > 1 ? `${roundCount} rounds in flight; run /workstreams:start to pick one.` : 'No round in flight here.'))
     }
-    await say(`Refreshed ${numbers.length} pull request${numbers.length === 1 ? '' : 's'} from GitHub.`)
+    const what = `${numbers.length} pull request${numbers.length === 1 ? '' : 's'}`
+    await done(mode === 'auto' ? `Auto-refreshed ${what}.` : `Refreshed ${what} from GitHub.`)
   } catch (err) {
-    await say(`Refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+    await fail(err instanceof Error ? err.message : String(err))
   }
 }
 
-export const register: Register = on => {
+/** The auto-refresh interval in minutes from the setting; 0 is off. */
+const minutesOf = (value: unknown): number => {
+  const minutes = Number(value ?? 3)
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 0
+}
+
+export const register: Register = (on, options) => {
+  const minutes = minutesOf(options.autoRefresh)
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'workstreams-board',
@@ -156,6 +193,12 @@ export const register: Register = on => {
         .map(agent => ({ id: agent.id, description: agent.description, type: agent.type, status: agent.status }))
       const before = await read($, agents)
       if (JSON.stringify(before) !== JSON.stringify(list)) await update($, agents, () => list)
+    })
+    // Auto-refresh: checked each minute, reading GitHub only once the board has gone quiet.
+    $.clock.every(60_000, async () => {
+      const r = await read($, refreshing)
+      if (r.isBusy || !shouldPoll(await read($, board), await $.clock.now(), minutes, r.failures ?? 0)) return
+      await refresh($, 'auto')
     })
     $.clock.every(30_000, async () => {
       if (isActive(await read($, board))) await update($, tick, n => n + 1)
@@ -221,7 +264,7 @@ export const register: Register = on => {
           <Text dimColor>No workstreams round seen in this session yet.</Text>
           <Text dimColor>Run /workstreams:start, or read a round in flight from GitHub:</Text>
           <Box flexDirection="row" gap={1} marginTop={1}>
-            <Button key="refresh" hotkey="r" onPress={() => void refresh($)}>
+            <Button key="refresh" hotkey="r" onPress={() => void refresh($, 'full')}>
               {r.isBusy ? 'Refreshing…' : 'Refresh'}
             </Button>
             {r.note !== null && !r.isBusy && <Text dimColor>{r.note}</Text>}
@@ -263,9 +306,12 @@ export const register: Register = on => {
           <Text color={watchText.color}>{watchText.text}</Text>
         </Box>
         <Box flexDirection="row" gap={1}>
-          <Button key="refresh" hotkey="r" plain dimColor onPress={() => void refresh($)}>
+          <Button key="refresh" hotkey="r" plain dimColor onPress={() => void refresh($, 'full')}>
             {r.isBusy ? '↻ refreshing…' : '↻ refresh'}
           </Button>
+          <Text dimColor>
+            {`updated ${span(now - b.updatedAt)} ago · ${minutes > 0 ? `auto every ${minutes}m` : 'auto off'}`}
+          </Text>
           {r.note !== null && !r.isBusy && <Text dimColor>{r.note}</Text>}
         </Box>
         {b.issues.length > 0 && (

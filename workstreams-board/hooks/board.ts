@@ -403,10 +403,11 @@ export const replay = (rows: readonly Row[], now: number): Board => {
   return board
 }
 
-/** One pull request from `gh pr list --json number,headRefName,closingIssuesReferences`. */
+/** One pull request from `gh pr list --json number,headRefName,baseRefName,closingIssuesReferences`. */
 export type ListedPull = {
   number: number
   headRefName: string
+  baseRefName?: string
   closingIssuesReferences?: readonly { number: number }[]
 }
 
@@ -427,4 +428,41 @@ export const roundPullRequests = (board: Board, pulls: readonly ListedPull[]): n
   }
   const known = board.layers.flatMap(layer => (layer.pullRequest === null ? [] : [layer.pullRequest]))
   return [...new Set([...newest.values(), ...known])].sort((a, b) => a - b)
+}
+
+/**
+ * Attaches the round's pull requests to their layers from `gh pr list` alone,
+ * with no git: a planned branch gets its number, and a pull request whose base
+ * is another round layer's head is stacked on it. pr-state fills in the rest.
+ */
+export const applyPullList = (board: Board, pulls: readonly ListedPull[], numbers: readonly number[], now: number): Board => {
+  const round = pulls.filter(pull => numbers.includes(pull.number))
+  const byHead = new Map(round.map(pull => [pull.headRefName, pull.number]))
+  let layers = board.layers
+  for (const pull of round) {
+    const below = pull.baseRefName === undefined ? undefined : byHead.get(pull.baseRefName)
+    layers = upsert(layers, { pullRequest: pull.number, head: pull.headRefName }, now, layer => ({
+      ...layer,
+      pullRequest: pull.number,
+      head: pull.headRefName,
+      stackedOn: below ?? layer.stackedOn,
+    }))
+  }
+  return layers === board.layers ? board : { ...board, layers }
+}
+
+const FINAL: readonly (LoopState | null)[] = ['done', 'merged', 'closed']
+
+/**
+ * Whether the automatic refresh reads GitHub now: a round on the board, not
+ * ended or finished, quiet (no tick or refresh) for `minutes`, and fewer than
+ * three automatic reads failed in a row.
+ */
+export const shouldPoll = (board: Board, now: number, minutes: number, failures: number): boolean => {
+  if (minutes <= 0 || failures >= 3 || !isActive(board)) return false
+  if (board.phase === 'round-end') return false
+  const opened = board.layers.filter(layer => layer.pullRequest !== null)
+  const isFinished = board.layers.length > 0 && opened.length === board.layers.length && opened.every(layer => FINAL.includes(layer.state))
+  if (isFinished) return false
+  return now - board.updatedAt >= minutes * 60_000
 }
