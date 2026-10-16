@@ -15,6 +15,11 @@
       "name": "copy-chips",
       "source": "./copy-chips",
       "description": "Click-to-copy chips above the prompt for the commands, ids, paths and URLs in Claude's last replies"
+    },
+    {
+      "name": "workstreams-board",
+      "source": "./workstreams-board",
+      "description": "A live pane for a workstreams round: each stack layer's place in the review loop, its CI, threads, agents and collisions"
     }
   ]
 }
