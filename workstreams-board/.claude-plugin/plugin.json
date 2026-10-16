@@ -1,0 +1,12 @@
+{
+  "name": "workstreams-board",
+  "version": "0.2.0",
+  "description": "A live pane for a workstreams round: each stack layer's place in the review loop, its CI, threads, agents and collisions",
+  "author": {
+    "name": "srwiseman",
+    "url": "https://github.com/srwiseman"
+  },
+  "homepage": "https://github.com/srwiseman/claude-mods/tree/main/workstreams-board",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

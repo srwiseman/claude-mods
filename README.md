@@ -6,6 +6,7 @@
 | --- | --- |
 | [session-board](session-board/) | A sidebar showing the issue you're on, live progress, what needs you, what got done, and what it cost |
 | [copy-chips](copy-chips/) | Click-to-copy chips above the prompt for the commands, ids, paths and URLs in Claude's replies |
+| [workstreams-board](workstreams-board/) | A live pane for a [workstreams](https://github.com/bje-settings/claude/tree/main/plugins/workstreams) round: each layer through the review loop, its CI, threads, agents and collisions |
 
 ## Get started
 
